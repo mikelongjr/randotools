@@ -310,7 +310,7 @@ print_summary() {
     echo "  GPU mode      : $detected_gpu"
     echo "  Virtual env   : $VENV_DIR"
     echo "  Launch GUI    : source $VENV_DIR/bin/activate && realesrgan-upscaler"
-    echo "  CLI script    : source $VENV_DIR/bin/activate && python upscaler/upscale_frames.py"
+    echo "  Legacy CLI    : source $VENV_DIR/bin/activate && python upscaler/upscale_frames.py"
     echo ""
 
     if [[ "$detected_gpu" == "amd" ]]; then

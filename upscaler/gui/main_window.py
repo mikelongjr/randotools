@@ -675,8 +675,9 @@ class MainWindow(QMainWindow):
 
     def _enqueue_files(self, paths: List[str]) -> None:
         existing = {
-            self._queue_list.item(i).filepath  # type: ignore[attr-defined]
+            item.filepath
             for i in range(self._queue_list.count())
+            if isinstance(item := self._queue_list.item(i), QueueItem)
         }
         added = 0
         for p in paths:
@@ -750,8 +751,9 @@ class MainWindow(QMainWindow):
 
         device = self._current_device_string()
         files = [
-            self._queue_list.item(i).filepath  # type: ignore[attr-defined]
+            item.filepath
             for i in range(self._queue_list.count())
+            if isinstance(item := self._queue_list.item(i), QueueItem)
         ]
 
         # Save settings
