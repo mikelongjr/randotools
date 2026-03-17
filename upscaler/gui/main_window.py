@@ -44,6 +44,7 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -1389,9 +1390,14 @@ class MainWindow(QMainWindow):
         item = self._queue_item_map.get(filename)
         if item is not None:
             item.set_status(QueueItem.STATUS_PROCESSING)
-            # Don't call scrollToItem here: with large queues (100k+ files) it
-            # forces Qt to recalculate every item's position on every file start,
-            # which can block the event loop long enough to trigger "Not Responding".
+            # Scroll so the active item appears near the top of the viewport,
+            # leaving the items below it (the upcoming queue) visible.
+            # setUniformItemSizes(True) makes scrollToItem O(1) — safe for
+            # large queues because Qt uses index × itemHeight instead of
+            # iterating over all items to compute positions.
+            self._queue_list.scrollToItem(
+                item, QAbstractItemView.ScrollHint.PositionAtTop
+            )
 
     def _on_progress(self, completed: int, total: int, filename: str, eta_s: float, avg_spf: float) -> None:
         # `completed` and `total` are relative to the worker's batch (files_to_process).
