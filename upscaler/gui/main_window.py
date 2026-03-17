@@ -358,6 +358,7 @@ class MainWindow(QMainWindow):
         # Worker reference
         self._worker: Optional[UpscaleWorker] = None
         self._thermal_timer: Optional[QTimer] = None
+        self._active_output_dir: str = ""  # set in _start_processing to the model-suffixed dir
 
         # Power manager (lazy-initialised on first run)
         self._power_mgr = None
@@ -794,6 +795,12 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Append a model hint to the output directory so the user can tell at
+        # a glance which model produced a given output folder.
+        # e.g. /home/user/upscaled → /home/user/upscaled_x4plus
+        model_suffix = Config.model_output_suffix(model_key)
+        output_dir = f"{output_dir.rstrip('/')}_{model_suffix}"
+
         device = self._current_device_string()
         files = [
             item.filepath
@@ -806,6 +813,10 @@ class MainWindow(QMainWindow):
         self._config.preferred_gpu_index = self._gpu_combo.currentIndex()
         self._config.use_half_precision = self._half_cb.isChecked()
         self._config.save()
+
+        # Remember the actual (suffixed) output directory so preview and other
+        # slots can reference files in the right place.
+        self._active_output_dir = output_dir
 
         # Reset UI
         self._progress_bar.setRange(0, len(files))
@@ -869,7 +880,7 @@ class MainWindow(QMainWindow):
                 item.set_status(QueueItem.STATUS_DONE if success else QueueItem.STATUS_ERROR)
                 # Show output preview for first completed file
                 if success and self._preview_out:
-                    out_path = os.path.join(self._config.output_dir, filename)
+                    out_path = os.path.join(self._active_output_dir, filename)
                     self._preview_out.show_image(out_path)
                 break
 

@@ -54,7 +54,7 @@ except ImportError:
 
 # --- Configuration ---
 INPUT_DIR = 'frames'
-OUTPUT_DIR = 'upscaled_frames_4X'
+_OUTPUT_BASE = 'upscaled_frames'  # model suffix appended at runtime → e.g. upscaled_frames_x4plus
 # ---------------------
 
 def run_diagnostics():
@@ -112,11 +112,11 @@ def run_diagnostics():
     print("2. HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=1 python upscale_frames.py")
     print("="*40 + "\n")
 run_diagnostics()
-def loader_thread(image_paths, q_in, num_workers):
+def loader_thread(image_paths, q_in, num_workers, output_dir):
     """Loads image paths into the input queue."""
     for path in image_paths:
         basename = os.path.basename(path)
-        output_path = os.path.join(OUTPUT_DIR, basename)
+        output_path = os.path.join(output_dir, basename)
         q_in.put((path, output_path))
     # Add sentinels for workers
     for _ in range(num_workers):
@@ -209,6 +209,16 @@ def main():
         print("    HSA_OVERRIDE_GFX_VERSION=11.0.0 python upscale_frames.py")
     print("---------------------------------------------------------------------------\n")
 
+    # Determine which model will be used and build the output directory name
+    # with a suffix so the user can tell at a glance which model was applied.
+    anime_weights = 'weights/RealESRGAN_x4plus_anime_6B.pth'
+    if os.path.exists(anime_weights) and RRDBNet:
+        _model_key = 'RealESRGAN_x4plus_anime_6B'
+    else:
+        _model_key = 'RealESRGAN_x4plus'
+    from upscaler.config import Config
+    OUTPUT_DIR = f"{_OUTPUT_BASE}_{Config.model_output_suffix(_model_key)}"
+
     # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -241,7 +251,7 @@ def main():
         q_in = Queue(maxsize=num_workers * 4)
         q_out = Queue(maxsize=num_workers * 4)
 
-        loader = threading.Thread(target=loader_thread, args=(images_to_process, q_in, num_workers))
+        loader = threading.Thread(target=loader_thread, args=(images_to_process, q_in, num_workers, OUTPUT_DIR))
         loader.start()
 
         processors = []
@@ -262,7 +272,6 @@ def main():
         # Original single-threaded CPU path
         device = devices[0]
         model = RealESRGAN(device, scale=4)
-        anime_weights = 'weights/RealESRGAN_x4plus_anime_6B.pth'
         if os.path.exists(anime_weights) and RRDBNet:
             print(f"Using fast Anime 6B model: {anime_weights}")
             model.model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)

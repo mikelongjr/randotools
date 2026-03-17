@@ -18,7 +18,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,34 @@ class Config:
             "requires_basicsr": True,
         },
     }
+
+    # Short, filesystem-safe suffix appended to output directory names so the
+    # user can immediately tell which model produced a given output folder.
+    _MODEL_SUFFIXES: ClassVar[dict] = {
+        "RealESRGAN_x2plus":          "x2plus",
+        "RealESRGAN_x4plus":          "x4plus",
+        "RealESRGAN_x4plus_anime_6B": "anime_6B",
+        "realesr-general-x4v3":       "x4v3",
+    }
+
+    @classmethod
+    def model_output_suffix(cls, model_key: Optional[str] = None) -> str:
+        """Return a short suffix for *model_key* suitable for directory names.
+
+        For example ``"RealESRGAN_x4plus"`` returns ``"x4plus"`` so that an
+        output directory chosen as ``/home/user/upscaled`` becomes
+        ``/home/user/upscaled_x4plus``.
+
+        Falls back to the model key itself with common prefixes stripped for
+        unknown keys.  The caller is responsible for ensuring the model key
+        does not contain characters that are illegal in directory names.
+        """
+        key = model_key or ""
+        if key in cls._MODEL_SUFFIXES:
+            return cls._MODEL_SUFFIXES[key]
+        # Generic fallback: strip common prefix and replace awkward characters
+        suffix = key.replace("RealESRGAN_", "").replace("realesr-", "")
+        return suffix or "upscaled"
 
     def get_model_info(self) -> dict:
         """Return metadata dict for the currently selected model."""
