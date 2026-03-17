@@ -149,30 +149,69 @@ class UpscaleWorker(QThread):
         os.makedirs(self.output_dir, exist_ok=True)
 
         # ------------------------------------------------------------------
-        # 3-stage pipeline: loader → GPU loop → saver
+        # 3-stage pipeline: loader pool → GPU loop → saver
         #
-        # The loader thread pre-reads images from disk while the GPU is busy
-        # processing the previous frame. The saver thread writes finished
-        # images to disk while the GPU processes the next frame. This keeps
-        # the GPU fully fed and overlaps both I/O directions with computation.
+        # A pool of loader threads pre-decodes images from disk in parallel
+        # while the GPU processes the previous frame.  The saver thread writes
+        # finished images to disk while the GPU processes the next frame.
+        #
+        # A single loader thread cannot keep a fast GPU fed because PNG/JPEG
+        # decode is CPU-bound; results arrive one-at-a-time no faster than the
+        # slowest decode.  With N parallel decoders the effective decode
+        # throughput is ~N× higher, eliminating the burst/idle pattern.
+        #
+        # Order is preserved: futures are submitted in file order and consumed
+        # in submission order before being placed on load_q, so the GPU loop
+        # always processes files in the original sequence.
         # ------------------------------------------------------------------
         _QUEUE_DEPTH = 8  # max frames buffered between loader→GPU and GPU→saver stages
+        # Number of parallel decode threads.  PNG decode releases the GIL so
+        # true parallelism is achievable.  Cap at 4 to avoid overwhelming the
+        # I/O bus on spinning-rust storage or saturating CPU cache on small SSDs.
+        _N_LOADERS = min(4, os.cpu_count() or 1)
+        # Sliding window: how many futures we keep in-flight at once.  Large
+        # enough to keep all loader threads busy; small enough to bound the
+        # number of fully-decoded images held in RAM at any moment.
+        _LOADER_WINDOW = _QUEUE_DEPTH + _N_LOADERS
 
         load_q: _queue.Queue = _queue.Queue(maxsize=_QUEUE_DEPTH)
         save_q: _queue.Queue = _queue.Queue(maxsize=_QUEUE_DEPTH)
 
         def _loader() -> None:
-            """Stage 1: read each source image from disk into a PIL Image."""
-            for src in self.input_files:
+            """Stage 1: decode source images in parallel, yield results in order."""
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _load_one(src: str):
                 if self._cancel:
-                    break
+                    return src, None, "cancelled"
                 try:
                     img = Image.open(src).convert("RGB")
-                    err: Optional[str] = None
+                    return src, img, None
                 except Exception as exc:
-                    img = None
-                    err = str(exc)
-                load_q.put((src, img, err))
+                    return src, None, str(exc)
+
+            files_iter = iter(self.input_files)
+            pending: list = []
+
+            with ThreadPoolExecutor(max_workers=_N_LOADERS) as pool:
+                # Seed the sliding window
+                for src in files_iter:
+                    pending.append(pool.submit(_load_one, src))
+                    if len(pending) >= _LOADER_WINDOW:
+                        break
+
+                while pending:
+                    if self._cancel:
+                        break
+                    # Block until the *oldest* future is ready, preserving order
+                    result = pending.pop(0).result()
+                    load_q.put(result)
+                    # Advance the window by one
+                    try:
+                        pending.append(pool.submit(_load_one, next(files_iter)))
+                    except StopIteration:
+                        pass
+
             load_q.put(None)  # sentinel
 
         def _saver() -> None:
