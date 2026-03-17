@@ -467,7 +467,12 @@ class MainWindow(QMainWindow):
         opt_grid.addWidget(self._btn_output, 2, 2)
 
         # Half-precision
-        self._half_cb = QCheckBox("Use FP16 (half-precision) — faster, recommended for GPU")
+        self._half_cb = QCheckBox("Use FP16 half-precision")
+        self._half_cb.setToolTip(
+            "Converts the model to 16-bit float for faster inference.\n"
+            "Requires CUDA compute capability ≥ 7.0 (Volta / GTX 20-series or newer).\n"
+            "Automatically disabled for older GPUs (e.g. GTX 10-series / Pascal)."
+        )
         self._half_cb.setChecked(self._config.use_half_precision)
         opt_grid.addWidget(self._half_cb, 3, 0, 1, 3)
 

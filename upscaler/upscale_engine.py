@@ -178,6 +178,27 @@ class UpscaleEngine:
             model.load_weights(self.weights_path, download=False)
 
         if self.use_half_precision and self.device_string != "cpu":
+            # Pascal GPUs (CUDA compute capability < 7.0) lack efficient native
+            # FP16 support.  Newer PyTorch builds compile without FP16 kernels for
+            # those devices, so running inference with a half()-converted model
+            # raises: "CUDA error: no kernel image is available for execution on
+            # the device".  Detect this condition early and fall back to FP32.
+            if "cuda" in self.device_string:
+                try:
+                    dev_idx = int(self.device_string.split(":")[-1]) if ":" in self.device_string else 0
+                    props = torch.cuda.get_device_properties(dev_idx)
+                    if props.major < 7:
+                        logger.warning(
+                            "%s has CUDA compute capability %d.%d (pre-Volta / < 7.0). "
+                            "FP16 is not reliably supported; disabling half-precision "
+                            "to avoid 'no kernel image' CUDA errors.",
+                            torch.cuda.get_device_name(dev_idx), props.major, props.minor,
+                        )
+                        self.use_half_precision = False
+                except Exception as _cc_err:
+                    logger.debug("Could not query CUDA device properties for FP16 check: %s", _cc_err)
+
+        if self.use_half_precision and self.device_string != "cpu":
             try:
                 model.model.half()
             except Exception:
