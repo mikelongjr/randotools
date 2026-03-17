@@ -225,15 +225,39 @@ install_python_deps() {
             warn "BasicSR: pip install failed; trying git-clone fallback…"
             # Attempt 2 – clone from git so that setup.py's git rev-parse
             #             call finds a real repo and the VERSION file is
-            #             guaranteed present.
+            #             guaranteed present.  Then patch setup.py to fix a
+            #             Python 3 exec/locals scoping bug before installing.
             local _bsr_tmp
             _bsr_tmp="$(mktemp -d)"
-            git clone --depth 1 \
-                https://github.com/XPixelGroup/BasicSR.git \
-                "${_bsr_tmp}/BasicSR" \
-                && CUDA_VISIBLE_DEVICES='' \
-                   pip install "${_bsr_tmp}/BasicSR" --no-build-isolation \
-                && { rm -rf "${_bsr_tmp}"; return 0; }
+            if git clone --depth 1 \
+                    https://github.com/XPixelGroup/BasicSR.git \
+                    "${_bsr_tmp}/BasicSR"; then
+                # BasicSR's get_version() uses:
+                #   exec(compile(f.read(), version_file, 'exec'))
+                #   return locals()['__version__']
+                # In Python 3.13+ (PEP 667) exec() inside a function does NOT
+                # update the enclosing locals() dict (locals() now returns a
+                # snapshot), so this raises KeyError: '__version__'.  We
+                # redirect exec() output into an explicit namespace dict.
+                python3 - "${_bsr_tmp}/BasicSR/setup.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+patched = src.replace(
+    "exec(compile(f.read(), version_file, 'exec'))",
+    "_ns = {}; exec(compile(f.read(), version_file, 'exec'), _ns)"
+).replace(
+    "return locals()['__version__']",
+    "return _ns['__version__']"
+)
+with open(path, 'w') as f:
+    f.write(patched)
+PYEOF
+                CUDA_VISIBLE_DEVICES='' \
+                    pip install "${_bsr_tmp}/BasicSR" --no-build-isolation \
+                    && { rm -rf "${_bsr_tmp}"; return 0; }
+            fi
             rm -rf "${_bsr_tmp}"
 
             return 1
@@ -243,8 +267,8 @@ install_python_deps() {
             success "BasicSR installed."
         else
             warn "BasicSR installation failed (optional — standard models still work)."
-            warn "To install manually:"
-            warn "  CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation"
+            warn "To install manually, see the 'BasicSR Install Error' section in"
+            warn "  upscaler/README.md  (clone + patch setup.py + pip install)."
         fi
     fi
 

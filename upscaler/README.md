@@ -234,24 +234,44 @@ pip install --force-reinstall --user torch torchvision
 
 ### BasicSR Install Error
 BasicSR is only distributed as a source tarball (no pre-built wheel).
-pip's default build isolation creates a fresh virtual-env and tries to
-download PyTorch inside it — which usually hangs or fails.
+Two separate issues can prevent a clean install:
+
+1. **Build isolation**: pip's default PEP 517 isolation creates a fresh
+   virtual-env and tries to download PyTorch inside it, which usually hangs
+   or fails.  Use `--no-build-isolation` so setup.py reuses the already-
+   installed torch/numpy.
+
+2. **Python 3.13 exec/locals bug (PEP 667)**: BasicSR's `get_version()` calls
+   `exec()` inside a function and then reads back `locals()['__version__']`.
+   Python 3.13 changed `locals()` to return a snapshot (PEP 667), so `exec()`
+   no longer updates the enclosing scope — raising `KeyError: '__version__'`.
 
 ```bash
 # Install build dependencies first
 sudo dnf install gcc-c++ python3-devel
 
-# Install using the already-present torch/numpy (skip build isolation)
-CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation
-```
+# Step 1 – clone the source (gives a real git repo so version.py exists)
+git clone --depth 1 https://github.com/XPixelGroup/BasicSR.git /tmp/BasicSR
 
-If that still fails, install from git (guarantees the VERSION file and
-git history are present):
+# Step 2 – patch setup.py to fix the Python 3 exec/locals bug
+python3 - /tmp/BasicSR/setup.py <<'EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+patched = src.replace(
+    "exec(compile(f.read(), version_file, 'exec'))",
+    "_ns = {}; exec(compile(f.read(), version_file, 'exec'), _ns)"
+).replace(
+    "return locals()['__version__']",
+    "return _ns['__version__']"
+)
+with open(path, 'w') as f:
+    f.write(patched)
+EOF
 
-```bash
-CUDA_VISIBLE_DEVICES='' pip install \
-    git+https://github.com/XPixelGroup/BasicSR.git \
-    --no-build-isolation
+# Step 3 – install from the patched local checkout
+CUDA_VISIBLE_DEVICES='' pip install /tmp/BasicSR --no-build-isolation
 ```
 
 > **Note:** `SETUPTOOLS_SCM_PRETEND_VERSION` has no effect for basicsr —
