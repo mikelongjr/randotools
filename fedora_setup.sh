@@ -210,7 +210,7 @@ install_package() {
     # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
     info "Installing upscaler package in development mode…"
-    pip install -e "${REPO_DIR}"
+    pip install -e "${REPO_DIR}/upscaler"
     success "Package installed."
 }
 
