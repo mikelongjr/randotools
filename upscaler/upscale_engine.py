@@ -202,7 +202,7 @@ class UpscaleEngine:
                 )
             model.model = SRVGGNetCompact(
                 num_in_ch=3, num_out_ch=3,
-                num_feat=64, num_conv=16,
+                num_feat=64, num_conv=32,
                 upscale=scale, act_type="prelu",
             )
             model.model.to(self._device)
