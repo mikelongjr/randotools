@@ -232,11 +232,30 @@ HSA_OVERRIDE_GFX_VERSION=10.3.0 realesrgan-upscaler-gui
 pip install --force-reinstall --user torch torchvision
 ```
 
-### BasicSR Import Error
+### BasicSR Install Error
+BasicSR is only distributed as a source tarball (no pre-built wheel).
+pip's default build isolation creates a fresh virtual-env and tries to
+download PyTorch inside it — which usually hangs or fails.
+
 ```bash
-# Install without GPU extensions
-CUDA_VISIBLE_DEVICES='' pip install --user basicsr
+# Install build dependencies first
+sudo dnf install gcc-c++ python3-devel
+
+# Install using the already-present torch/numpy (skip build isolation)
+CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation
 ```
+
+If that still fails, install from git (guarantees the VERSION file and
+git history are present):
+
+```bash
+CUDA_VISIBLE_DEVICES='' pip install \
+    git+https://github.com/XPixelGroup/BasicSR.git \
+    --no-build-isolation
+```
+
+> **Note:** `SETUPTOOLS_SCM_PRETEND_VERSION` has no effect for basicsr —
+> it uses its own git-hash helper, not setuptools_scm.
 
 For more troubleshooting, see [INSTALL.md](INSTALL.md#troubleshooting)
 

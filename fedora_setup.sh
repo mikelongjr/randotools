@@ -196,31 +196,45 @@ install_python_deps() {
     pip install py_real_esrgan
 
     # BasicSR (optional, requires build tools)
-    # Well-known issue: basicsr's setup.py calls `git describe` to determine its own
-    # version.  Outside a git checkout (or in a shallow clone without tags) this
-    # crashes with "returned non-zero exit status 128".  We work around it by
-    # supplying a fake version via SETUPTOOLS_SCM_PRETEND_VERSION so the build
-    # system never has to run git at all.
+    #
+    # Well-known issue: basicsr is only distributed as a source tarball (no
+    # pre-built wheel on PyPI).  Its setup.py declares:
+    #   setup_requires=['cython', 'numpy', 'torch']
+    # When pip builds with its default PEP 517 isolation it creates a fresh
+    # virtual-env, tries to install PyTorch inside it, and usually hangs or
+    # fails.  The fix is --no-build-isolation, which lets setup.py use the
+    # torch/numpy that are already installed in this venv.
+    #
+    # basicsr uses its OWN git-hash helper (not setuptools_scm), so setting
+    # SETUPTOOLS_SCM_PRETEND_VERSION has no effect and is intentionally omitted.
     if command -v gcc &>/dev/null && command -v g++ &>/dev/null; then
         info "Installing BasicSR (enables additional model variants)…"
 
         _install_basicsr() {
-            # SETUPTOOLS_SCM_PRETEND_VERSION: the value is passed as a fake
-            # version string so setuptools_scm never invokes `git describe`.
-            # Keep this in sync with the version comment in requirements.txt.
-            # 1.4.2 is the latest stable release of basicsr.
-            # Attempt 1 – standard install with version-detection bypass
-            SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 \
-                CUDA_VISIBLE_DEVICES='' \
-                pip install basicsr \
-                && return 0
-
-            warn "BasicSR: first attempt failed; retrying with --no-build-isolation…"
-            # Attempt 2 – skip PEP 517 isolation so the host setuptools is used
-            SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 \
-                CUDA_VISIBLE_DEVICES='' \
+            # Attempt 1 – skip build isolation so the already-installed
+            #             torch/numpy satisfy setup_requires without a
+            #             separate download.
+            # CUDA_VISIBLE_DEVICES='': prevents CUDA initialisation during
+            #             the setup.py build, which can crash or hang on
+            #             systems where the GPU driver isn't fully available
+            #             at install time.
+            CUDA_VISIBLE_DEVICES='' \
                 pip install basicsr --no-build-isolation \
                 && return 0
+
+            warn "BasicSR: pip install failed; trying git-clone fallback…"
+            # Attempt 2 – clone from git so that setup.py's git rev-parse
+            #             call finds a real repo and the VERSION file is
+            #             guaranteed present.
+            local _bsr_tmp
+            _bsr_tmp="$(mktemp -d)"
+            git clone --depth 1 \
+                https://github.com/XPixelGroup/BasicSR.git \
+                "${_bsr_tmp}/BasicSR" \
+                && CUDA_VISIBLE_DEVICES='' \
+                   pip install "${_bsr_tmp}/BasicSR" --no-build-isolation \
+                && { rm -rf "${_bsr_tmp}"; return 0; }
+            rm -rf "${_bsr_tmp}"
 
             return 1
         }
@@ -229,7 +243,8 @@ install_python_deps() {
             success "BasicSR installed."
         else
             warn "BasicSR installation failed (optional — standard models still work)."
-            warn "To install manually:  SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 CUDA_VISIBLE_DEVICES='' pip install basicsr"
+            warn "To install manually:"
+            warn "  CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation"
         fi
     fi
 

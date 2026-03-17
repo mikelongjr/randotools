@@ -50,7 +50,7 @@ except ImportError:
     print("\n[WARNING] 'basicsr' is not installed. Native x2 and Anime 6B models will be disabled.")
     print("          To fix on Fedora (skipping extension compilation):")
     print("            sudo dnf install gcc-c++ python3-devel")
-    print("            CUDA_VISIBLE_DEVICES='' pip install basicsr\n")
+    print("            CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation\n")
 
 # --- Configuration ---
 INPUT_DIR = 'frames'

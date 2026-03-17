@@ -471,9 +471,9 @@ class MainWindow(QMainWindow):
                 )
                 self._model_combo.model().item(idx).setToolTip(
                     "This model requires the 'basicsr' package.\n"
-                    "Install it with:  pip install basicsr\n"
-                    "On Fedora (skip extension compilation):\n"
-                    "  CUDA_VISIBLE_DEVICES='' pip install basicsr"
+                    "Install it with (skip build isolation so the\n"
+                    "already-installed torch is reused):\n"
+                    "  CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation"
                 )
         # Select saved model (skip disabled entries if basicsr is absent)
         saved_idx = self._model_combo.findData(self._config.model_name)

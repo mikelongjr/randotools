@@ -24,9 +24,16 @@ py_real_esrgan>=0.0.3
 huggingface_hub<0.16.0
 
 # BasicSR (optional – enables additional model variants: anime_6B, general-x4v3)
-# Well-known issue: basicsr uses `git describe` to detect its own version at build
-# time.  Outside a git checkout this fails.  Workaround:
-#   SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 CUDA_VISIBLE_DEVICES='' pip install basicsr
+# PyPI only distributes basicsr as a source tarball (no pre-built wheel).
+# Its setup.py requires torch at build time; pip's default build isolation
+# creates a fresh venv and tries to install PyTorch inside it, which usually
+# hangs or fails.
+# Working install command:
+#   CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation
+# The flag --no-build-isolation lets setup.py reuse the already-installed
+# torch/numpy instead of downloading PyTorch a second time.
+# (Note: basicsr uses its own git-hash helper, not setuptools_scm, so
+#  SETUPTOOLS_SCM_PRETEND_VERSION has no effect and should not be used.)
 # Uncomment the line below only after installing build dependencies:
 #   sudo dnf install gcc-c++ python3-devel
 # basicsr>=1.4.2
