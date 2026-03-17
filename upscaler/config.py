@@ -119,21 +119,25 @@ class Config:
             "scale": 2,
             "description": "2× upscaling — general photos",
             "filename": "RealESRGAN_x2plus.pth",
+            "requires_basicsr": False,
         },
         "RealESRGAN_x4plus": {
             "scale": 4,
             "description": "4× upscaling — general photos (high quality)",
             "filename": "RealESRGAN_x4plus.pth",
+            "requires_basicsr": False,
         },
         "RealESRGAN_x4plus_anime_6B": {
             "scale": 4,
             "description": "4× upscaling — anime / illustration",
             "filename": "RealESRGAN_x4plus_anime_6B.pth",
+            "requires_basicsr": True,
         },
         "realesr-general-x4v3": {
             "scale": 4,
             "description": "4× upscaling — general (fast variant)",
             "filename": "realesr-general-x4v3.pth",
+            "requires_basicsr": True,
         },
     }
 

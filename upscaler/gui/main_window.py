@@ -374,6 +374,15 @@ class MainWindow(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _basicsr_available() -> bool:
+        """Return True if the basicsr package can be imported."""
+        try:
+            import basicsr  # noqa: F401  # type: ignore
+            return True
+        except ImportError:
+            return False
+
     def _setup_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
@@ -437,14 +446,34 @@ class MainWindow(QMainWindow):
         # Model
         opt_grid.addWidget(QLabel("Model:"), 0, 0)
         self._model_combo = QComboBox()
+        _basicsr_ok = self._basicsr_available()
         for key, meta in Config.MODELS.items():
-            self._model_combo.addItem(
-                f"{key}  —  {meta['description']}", userData=key
-            )
-        # Select saved model
+            needs_basicsr = meta.get("requires_basicsr", False)
+            if needs_basicsr and not _basicsr_ok:
+                label = f"{key}  —  {meta['description']}  ⚠ (requires BasicSR)"
+            else:
+                label = f"{key}  —  {meta['description']}"
+            self._model_combo.addItem(label, userData=key)
+            if needs_basicsr and not _basicsr_ok:
+                # Grey out and disable the item so it cannot be selected
+                idx = self._model_combo.count() - 1
+                item_flags = self._model_combo.model().item(idx).flags()
+                self._model_combo.model().item(idx).setFlags(
+                    item_flags & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                self._model_combo.model().item(idx).setToolTip(
+                    "This model requires the 'basicsr' package.\n"
+                    "Install it with:  pip install basicsr\n"
+                    "On Fedora (skip extension compilation):\n"
+                    "  CUDA_VISIBLE_DEVICES='' pip install basicsr"
+                )
+        # Select saved model (skip disabled entries if basicsr is absent)
         saved_idx = self._model_combo.findData(self._config.model_name)
         if saved_idx >= 0:
-            self._model_combo.setCurrentIndex(saved_idx)
+            item = self._model_combo.model().item(saved_idx)
+            if item and (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+                self._model_combo.setCurrentIndex(saved_idx)
+            # else: leave the first enabled item selected (Qt default)
         opt_grid.addWidget(self._model_combo, 0, 1)
 
         # GPU
@@ -459,7 +488,10 @@ class MainWindow(QMainWindow):
         # Output directory
         opt_grid.addWidget(QLabel("Output Dir:"), 2, 0)
         self._output_edit = QLabel(self._config.output_dir or "(not set)")
-        self._output_edit.setStyleSheet("background:#1e1e2e; padding:3px; border-radius:3px;")
+        self._output_edit.setStyleSheet(
+            "background: palette(base); color: palette(text); "
+            "padding:3px; border-radius:3px;"
+        )
         opt_grid.addWidget(self._output_edit, 2, 1)
         self._btn_output = QPushButton("Browse…")
         self._btn_output.setFixedWidth(120)

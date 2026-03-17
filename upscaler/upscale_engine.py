@@ -152,10 +152,15 @@ class UpscaleEngine:
         self._device = torch.device(self.device_string)
         scale = self._infer_scale()
 
-        # Optional basicsr fast model
+        # Optional basicsr architectures
         RRDBNet = None
+        SRVGGNetCompact = None
         try:
             from basicsr.archs.rrdbnet_arch import RRDBNet  # type: ignore
+        except ImportError:
+            pass
+        try:
+            from basicsr.archs.srvgg_arch import SRVGGNetCompact  # type: ignore
         except ImportError:
             pass
 
@@ -166,11 +171,35 @@ class UpscaleEngine:
         if not self.weights_path or not os.path.isfile(self.weights_path):
             raise FileNotFoundError(f"Weights file not found: {self.weights_path!r}")
 
-        if "anime_6B" in self.model_name and RRDBNet is not None:
+        if "anime_6B" in self.model_name:
+            if RRDBNet is None:
+                raise RuntimeError(
+                    "Model 'RealESRGAN_x4plus_anime_6B' requires the 'basicsr' package "
+                    "(RRDBNet architecture with 6 blocks), which is not installed.\n"
+                    "Install it with:  pip install basicsr\n"
+                    "On Fedora (skip extension compilation):  "
+                    "CUDA_VISIBLE_DEVICES='' pip install basicsr"
+                )
             model.model = RRDBNet(
                 num_in_ch=3, num_out_ch=3,
                 num_feat=64, num_block=6, num_grow_ch=32,
                 scale=scale,
+            )
+            model.model.to(self._device)
+            model.load_weights(self.weights_path, download=False)
+        elif "general-x4v3" in self.model_name:
+            if SRVGGNetCompact is None:
+                raise RuntimeError(
+                    "Model 'realesr-general-x4v3' requires the 'basicsr' package "
+                    "(SRVGGNetCompact architecture), which is not installed.\n"
+                    "Install it with:  pip install basicsr\n"
+                    "On Fedora (skip extension compilation):  "
+                    "CUDA_VISIBLE_DEVICES='' pip install basicsr"
+                )
+            model.model = SRVGGNetCompact(
+                num_in_ch=3, num_out_ch=3,
+                num_feat=64, num_conv=16,
+                upscale=scale, act_type="prelu",
             )
             model.model.to(self._device)
             model.load_weights(self.weights_path, download=False)
