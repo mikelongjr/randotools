@@ -1365,31 +1365,40 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _start_thermal_monitor(self) -> None:
+        # Initialise the PowerManager here and start its background polling
+        # thread so that nvidia-smi / rocm-smi subprocesses run off the GUI
+        # thread.  The QTimer callback only reads the already-cached result.
+        from upscaler.power_manager import PowerManager
+
+        device = self._current_device_string()
+        gpu_idx = 0
+        vendor = "auto"
+        if "cuda:" in device:
+            try:
+                gpu_idx = int(device.split(":")[-1])
+            except ValueError:
+                gpu_idx = 0
+            idx = self._gpu_combo.currentIndex()
+            if 0 <= idx < len(self._gpus):
+                vendor = "nvidia" if self._gpus[idx].vendor == GPUVendor.NVIDIA else "amd"
+        try:
+            self._power_mgr = PowerManager(gpu_index=gpu_idx, vendor=vendor)
+            self._power_mgr.start()  # background thread — never blocks the GUI
+        except Exception:
+            pass
+
         self._thermal_timer = QTimer(self)
         self._thermal_timer.setInterval(3000)  # 3 seconds
         self._thermal_timer.timeout.connect(self._poll_temperature)
         self._thermal_timer.start()
 
     def _poll_temperature(self) -> None:
-        from upscaler.power_manager import PowerManager
-
         if self._power_mgr is None:
-            device = self._current_device_string()
-            gpu_idx = 0
-            vendor = "auto"
-            if "cuda:" in device:
-                gpu_idx = int(device.split(":")[-1])
-                # Determine vendor from GPU info
-                idx = self._gpu_combo.currentIndex()
-                if 0 <= idx < len(self._gpus):
-                    vendor = "nvidia" if self._gpus[idx].vendor == GPUVendor.NVIDIA else "amd"
-            try:
-                self._power_mgr = PowerManager(gpu_index=gpu_idx, vendor=vendor)
-            except Exception:
-                return
+            return
 
         try:
-            temp = self._power_mgr.read_temperature()
+            # Read the temperature cached by the background thread — non-blocking.
+            temp = self._power_mgr.latest_temperature
             state = self._power_mgr.current_state.name
             self._thermal.update_temperature(temp, state)
         except Exception:
