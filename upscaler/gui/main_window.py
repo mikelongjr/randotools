@@ -744,6 +744,9 @@ class MainWindow(QMainWindow):
         # Throttle output preview updates: loading+scaling a 4× upscaled image on the
         # main thread is expensive.  See _PREVIEW_REFRESH_INTERVAL.
         self._last_preview_time: float = 0.0
+        # Number of already-completed files skipped at batch start (resume support).
+        # Used to offset the worker's 1-based "completed" index in the progress bar.
+        self._already_done_count: int = 0
 
         # Power manager (lazy-initialised on first run)
         self._power_mgr = None
@@ -1199,11 +1202,6 @@ class MainWindow(QMainWindow):
         output_dir = f"{output_dir.rstrip('/')}_{model_suffix}"
 
         device = self._current_device_string()
-        files = [
-            item.filepath
-            for i in range(self._queue_list.count())
-            if isinstance(item := self._queue_list.item(i), QueueItem)
-        ]
 
         # Save settings
         self._config.model_name = model_key
@@ -1215,29 +1213,68 @@ class MainWindow(QMainWindow):
         # slots can reference files in the right place.
         self._active_output_dir = output_dir
 
-        # Reset UI
-        self._progress_bar.setRange(0, len(files))
-        self._progress_bar.setValue(0)
-        self._eta_label.setText("ETA: calculating…")
-        self._btn_start.setEnabled(False)
-        self._btn_cancel.setEnabled(True)
-        self._log_message(f"Starting batch: {len(files)} file(s) → {output_dir}")
+        # Update the output-dir label so the user sees the actual destination
+        # (the model-suffixed path), not the base path they browsed to.
+        self._output_edit.setText(output_dir)
 
-        # Reset queue item statuses and build O(1) lookup dict for signal handlers
+        # ------------------------------------------------------------------
+        # Resume support: detect which output files already exist so we can
+        # skip them rather than re-processing completed frames.  os.scandir
+        # is used instead of os.listdir because it avoids a stat() call per
+        # entry on most file-systems, making it fast even for very large dirs.
+        # ------------------------------------------------------------------
+        existing_outputs: set[str] = set()
+        if os.path.isdir(output_dir):
+            try:
+                existing_outputs = {e.name for e in os.scandir(output_dir) if e.is_file()}
+            except OSError:
+                pass
+
+        # Build O(1) lookup dict, mark already-done items, collect remaining
         self._queue_item_map: dict[str, "QueueItem"] = {}
+        files_to_process: list[str] = []
         self._queue_list.setUpdatesEnabled(False)
         try:
             for i in range(self._queue_list.count()):
                 item = self._queue_list.item(i)
                 if isinstance(item, QueueItem):
-                    item.set_status(QueueItem.STATUS_PENDING)
                     self._queue_item_map[item.filename] = item
+                    if item.filename in existing_outputs:
+                        item.set_status(QueueItem.STATUS_DONE)
+                    else:
+                        item.set_status(QueueItem.STATUS_PENDING)
+                        files_to_process.append(item.filepath)
         finally:
             self._queue_list.setUpdatesEnabled(True)
 
+        total_in_queue = self._queue_list.count()
+        self._already_done_count = total_in_queue - len(files_to_process)
+
+        if not files_to_process:
+            self._log_message("✅ All files already upscaled — nothing to process.")
+            self._progress_bar.setRange(0, total_in_queue)
+            self._progress_bar.setValue(total_in_queue)
+            self._eta_label.setText("ETA: done")
+            self._status_label.setText(f"Done: {total_in_queue}/{total_in_queue} succeeded")
+            return
+
+        # Reset UI
+        self._progress_bar.setRange(0, total_in_queue)
+        self._progress_bar.setValue(self._already_done_count)
+        self._eta_label.setText("ETA: calculating…")
+        self._btn_start.setEnabled(False)
+        self._btn_cancel.setEnabled(True)
+        if self._already_done_count:
+            self._log_message(
+                f"Skipping {self._already_done_count} already-completed file(s)."
+            )
+        self._log_message(
+            f"Starting batch: {len(files_to_process)} file(s) → {output_dir}"
+        )
+
         # Launch worker
         self._worker = UpscaleWorker(
-            input_files=files,
+            input_files=files_to_process,
             output_dir=output_dir,
             model_name=model_key,
             device_string=device,
@@ -1270,11 +1307,18 @@ class MainWindow(QMainWindow):
             # which can block the event loop long enough to trigger "Not Responding".
 
     def _on_progress(self, completed: int, total: int, filename: str, eta_s: float) -> None:
-        self._progress_bar.setValue(completed)
-        self._progress_bar.setMaximum(total)
+        # `completed` and `total` are relative to the worker's batch (files_to_process).
+        # Offset by the number of already-completed files so the progress bar
+        # reflects the full queue (skipped + processed so far).
+        offset = self._already_done_count
+        total_in_queue = total + offset
+        self._progress_bar.setValue(completed + offset)
+        self._progress_bar.setMaximum(total_in_queue)
         eta_str = self._format_eta(eta_s)
         self._eta_label.setText(f"ETA: {eta_str}")
-        self._status_label.setText(f"Processing {completed}/{total}: {filename}")
+        self._status_label.setText(
+            f"Processing {completed + offset}/{total_in_queue}: {filename}"
+        )
 
     def _on_job_done(self, filename: str, success: bool, error: str) -> None:
         item = self._queue_item_map.get(filename)
