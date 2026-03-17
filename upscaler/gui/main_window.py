@@ -994,11 +994,15 @@ class MainWindow(QMainWindow):
             if isinstance(item := self._queue_list.item(i), QueueItem)
         }
         added = 0
-        for p in paths:
-            if p not in existing:
-                item = QueueItem(p)
-                self._queue_list.addItem(item)
-                added += 1
+        self._queue_list.setUpdatesEnabled(False)
+        try:
+            for p in paths:
+                if p not in existing:
+                    item = QueueItem(p)
+                    self._queue_list.addItem(item)
+                    added += 1
+        finally:
+            self._queue_list.setUpdatesEnabled(True)
         if added:
             self._log_message(f"Added {added} file(s) to queue.")
             self._status_label.setText(f"Queue: {self._queue_list.count()} file(s)")
@@ -1096,11 +1100,15 @@ class MainWindow(QMainWindow):
 
         # Reset queue item statuses and build O(1) lookup dict for signal handlers
         self._queue_item_map: dict[str, "QueueItem"] = {}
-        for i in range(self._queue_list.count()):
-            item = self._queue_list.item(i)
-            if isinstance(item, QueueItem):
-                item.set_status(QueueItem.STATUS_PENDING)
-                self._queue_item_map[item.filename] = item
+        self._queue_list.setUpdatesEnabled(False)
+        try:
+            for i in range(self._queue_list.count()):
+                item = self._queue_list.item(i)
+                if isinstance(item, QueueItem):
+                    item.set_status(QueueItem.STATUS_PENDING)
+                    self._queue_item_map[item.filename] = item
+        finally:
+            self._queue_list.setUpdatesEnabled(True)
 
         # Launch worker
         self._worker = UpscaleWorker(
