@@ -14,6 +14,7 @@ Features:
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import threading
@@ -94,10 +95,10 @@ class UpscaleWorker(QThread):
     log_message(text)
     """
 
-    job_started = pyqtSignal(str)                  # filename
-    progress = pyqtSignal(int, int, str, float)   # completed, total, filename, eta_s
-    job_done = pyqtSignal(str, bool, str)          # filename, success, error
-    finished = pyqtSignal(int, int, float)         # succeeded, failed, elapsed_s
+    job_started = pyqtSignal(str)                          # filename
+    progress = pyqtSignal(int, int, str, float, float)    # completed, total, filename, eta_s, avg_spf
+    job_done = pyqtSignal(str, bool, str)                  # filename, success, error
+    finished = pyqtSignal(int, int, float)                 # succeeded, failed, elapsed_s
     log_message = pyqtSignal(str)
 
     def __init__(
@@ -217,8 +218,8 @@ class UpscaleWorker(QThread):
 
         def _saver() -> None:
             """Stage 3: save finished images to disk and emit completion signals."""
-            total_s = 0.0
-            saved = 0
+            # 10-frame moving-average window for time-per-frame (seconds).
+            _recent_times: collections.deque = collections.deque(maxlen=10)
             while True:
                 entry = save_q.get()
                 if entry is None:
@@ -233,17 +234,18 @@ class UpscaleWorker(QThread):
                         final_success = False
                         final_error = str(exc)
                         self.log_message.emit(f"❌ Save failed [{filename}]: {exc}")
-                # Measure end-to-end time (GPU inference + save) for accurate ETA
+                # Measure end-to-end time (GPU inference + save) for accurate ETA.
                 elapsed_item = time.perf_counter() - t_start_item
-                total_s += elapsed_item
-                saved += 1
-                avg = total_s / saved
+                _recent_times.append(elapsed_item)
+                # Use the moving average of the last ≤10 frames for both ETA and
+                # the per-frame speed indicator shown in the progress panel.
+                avg_spf = sum(_recent_times) / len(_recent_times)
                 remaining = total - idx - 1
-                eta = avg * remaining
+                eta = avg_spf * remaining
                 # job_done and progress are emitted from this background thread;
                 # PyQt6 marshals cross-thread emissions via the queued connection.
                 self.job_done.emit(filename, final_success, final_error)
-                self.progress.emit(idx + 1, total, filename, eta)
+                self.progress.emit(idx + 1, total, filename, eta, avg_spf)
 
         loader_t = _threading.Thread(target=_loader, daemon=True)
         saver_t = _threading.Thread(target=_saver, daemon=True)
@@ -812,6 +814,7 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
         self._populate_gpu_combo()
         self._apply_window_geometry()
+        self._restore_last_queue()
         self._start_thermal_monitor()
 
     # ------------------------------------------------------------------
@@ -1001,9 +1004,17 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFormat("%v / %m  (%p%)")
         prog_layout.addWidget(self._progress_bar)
 
+        # Second row: moving-average speed on the left, ETA on the right
+        prog_stats_row = QHBoxLayout()
+        self._spf_label = QLabel("")
+        self._spf_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        prog_stats_row.addWidget(self._spf_label)
+
         self._eta_label = QLabel("ETA: —")
         self._eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        prog_layout.addWidget(self._eta_label)
+        prog_stats_row.addWidget(self._eta_label)
+
+        prog_layout.addLayout(prog_stats_row)
         center_layout.addWidget(progress_group)
 
         # Log
@@ -1205,6 +1216,20 @@ class MainWindow(QMainWindow):
         self._preview_in.clear()
         self._preview_out.clear()
         self._status_label.setText("Queue cleared")
+        # Forget the saved queue so it isn't restored on next startup.
+        self._config.last_queue_files = []
+        self._config.save()
+
+    def _restore_last_queue(self) -> None:
+        """Reload the queue saved at the previous session, if any."""
+        saved = [p for p in self._config.last_queue_files if os.path.isfile(p)]
+        if not saved:
+            return
+        self._enqueue_files(saved)
+        self._log_message(
+            f"Restored {len(saved)} file(s) from the previous session. "
+            "Ready to resume."
+        )
 
     def _on_queue_item_clicked(self, item: QListWidgetItem) -> None:
         if isinstance(item, QueueItem):
@@ -1323,6 +1348,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, total_in_queue)
         self._progress_bar.setValue(self._already_done_count)
         self._eta_label.setText("ETA: calculating…")
+        self._spf_label.setText("")
         self._btn_start.setEnabled(False)
         self._btn_cancel.setEnabled(True)
         if self._already_done_count:
@@ -1367,7 +1393,7 @@ class MainWindow(QMainWindow):
             # forces Qt to recalculate every item's position on every file start,
             # which can block the event loop long enough to trigger "Not Responding".
 
-    def _on_progress(self, completed: int, total: int, filename: str, eta_s: float) -> None:
+    def _on_progress(self, completed: int, total: int, filename: str, eta_s: float, avg_spf: float) -> None:
         # `completed` and `total` are relative to the worker's batch (files_to_process).
         # Offset by the number of already-completed files so the progress bar
         # reflects the full queue (skipped + processed so far).
@@ -1377,6 +1403,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setMaximum(total_in_queue)
         eta_str = self._format_eta(eta_s)
         self._eta_label.setText(f"ETA: {eta_str}")
+        self._spf_label.setText(f"~{avg_spf:.2f}s/frame (10-frame avg)")
         self._status_label.setText(
             f"Processing {completed + offset}/{total_in_queue}: {filename}"
         )
@@ -1412,6 +1439,12 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(self._progress_bar.maximum())
         self._eta_label.setText("ETA: done")
         self._queue_item_map.clear()
+
+        # If the batch finished without failures the queue is complete — clear
+        # the saved queue so the next startup doesn't restore finished work.
+        if failed == 0:
+            self._config.last_queue_files = []
+            self._config.save()
 
         if failed > 0:
             QMessageBox.warning(
@@ -1535,6 +1568,16 @@ class MainWindow(QMainWindow):
         # Save window size
         self._config.window_width = self.width()
         self._config.window_height = self.height()
+
+        # Persist the current queue so the next startup can restore it.
+        # Only non-empty queues are worth saving; a completely empty list is
+        # treated as "nothing to restore" on the next launch.
+        queue_paths = [
+            self._queue_list.item(i).filepath  # type: ignore[union-attr]
+            for i in range(self._queue_list.count())
+            if isinstance(self._queue_list.item(i), QueueItem)
+        ]
+        self._config.last_queue_files = queue_paths
         self._config.save()
 
         if self._thermal_timer:

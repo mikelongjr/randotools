@@ -67,6 +67,10 @@ class Config:
     log_level: str = "INFO"
     check_updates: bool = True
 
+    # Queue persistence — file paths saved on close so the last uncompleted
+    # batch is automatically restored on the next startup.
+    last_queue_files: List[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
