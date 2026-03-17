@@ -232,11 +232,50 @@ HSA_OVERRIDE_GFX_VERSION=10.3.0 realesrgan-upscaler-gui
 pip install --force-reinstall --user torch torchvision
 ```
 
-### BasicSR Import Error
+### BasicSR Install Error
+BasicSR is only distributed as a source tarball (no pre-built wheel).
+Two separate issues can prevent a clean install:
+
+1. **Build isolation**: pip's default PEP 517 isolation creates a fresh
+   virtual-env and tries to download PyTorch inside it, which usually hangs
+   or fails.  Use `--no-build-isolation` so setup.py reuses the already-
+   installed torch/numpy.
+
+2. **Python 3.13 exec/locals bug (PEP 667)**: BasicSR's `get_version()` calls
+   `exec()` inside a function and then reads back `locals()['__version__']`.
+   Python 3.13 changed `locals()` to return a snapshot (PEP 667), so `exec()`
+   no longer updates the enclosing scope — raising `KeyError: '__version__'`.
+
 ```bash
-# Install without GPU extensions
-CUDA_VISIBLE_DEVICES='' pip install --user basicsr
+# Install build dependencies first
+sudo dnf install gcc-c++ python3-devel
+
+# Step 1 – clone the source (gives a real git repo so version.py exists)
+git clone --depth 1 https://github.com/XPixelGroup/BasicSR.git /tmp/BasicSR
+
+# Step 2 – patch setup.py to fix the Python 3 exec/locals bug
+python3 - /tmp/BasicSR/setup.py <<'EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+patched = src.replace(
+    "exec(compile(f.read(), version_file, 'exec'))",
+    "_ns = {}; exec(compile(f.read(), version_file, 'exec'), _ns)"
+).replace(
+    "return locals()['__version__']",
+    "return _ns['__version__']"
+)
+with open(path, 'w') as f:
+    f.write(patched)
+EOF
+
+# Step 3 – install from the patched local checkout
+CUDA_VISIBLE_DEVICES='' pip install /tmp/BasicSR --no-build-isolation
 ```
+
+> **Note:** `SETUPTOOLS_SCM_PRETEND_VERSION` has no effect for basicsr —
+> it uses its own git-hash helper, not setuptools_scm.
 
 For more troubleshooting, see [INSTALL.md](INSTALL.md#troubleshooting)
 

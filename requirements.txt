@@ -1,0 +1,48 @@
+# RealESRGAN Upscaler - Python dependencies
+# Install with:  pip install -r requirements.txt
+#
+# For GPU acceleration, install the appropriate PyTorch build:
+#   NVIDIA (CUDA 12.1): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   AMD (ROCm 6.0):     pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
+#   CPU only:           pip install torch torchvision
+
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+
+# GUI
+PyQt6>=6.4.0
+
+# Image processing
+Pillow>=9.0.0
+opencv-python>=4.7.0
+
+# RealESRGAN model
+py_real_esrgan>=0.0.3
+
+# huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires
+huggingface_hub<0.16.0
+
+# BasicSR (optional – enables additional model variants: anime_6B, general-x4v3)
+# PyPI only distributes basicsr as a source tarball (no pre-built wheel).
+# Its setup.py requires torch at build time; pip's default build isolation
+# creates a fresh venv and tries to install PyTorch inside it, which usually
+# hangs or fails.
+# Working install command:
+#   CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation
+# The flag --no-build-isolation lets setup.py reuse the already-installed
+# torch/numpy instead of downloading PyTorch a second time.
+# (Note: basicsr uses its own git-hash helper, not setuptools_scm, so
+#  SETUPTOOLS_SCM_PRETEND_VERSION has no effect and should not be used.)
+# Uncomment the line below only after installing build dependencies:
+#   sudo dnf install gcc-c++ python3-devel
+# basicsr>=1.4.2
+
+# Progress and CLI utilities
+tqdm>=4.64.0
+
+# Configuration
+# (json and pathlib are from the standard library)
+
+# YAML config support (optional)
+# PyYAML>=6.0
