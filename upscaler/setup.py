@@ -9,7 +9,12 @@ setup(
     author='mikelongjr',
     url='https://github.com/mikelongjr/randotools',
     license='MIT',
-    packages=find_packages(),
+    # setup.py lives inside the 'upscaler/' package directory itself, so pip
+    # must be told that packages are rooted one level up (the repo root).
+    # Without this, pip adds randotools/upscaler/ to sys.path and
+    # `import upscaler` fails because there is no upscaler/upscaler/ sub-dir.
+    package_dir={'': '..'},
+    packages=find_packages('..'),
     python_requires='>=3.8',
     install_requires=[
         # GUI
@@ -19,6 +24,8 @@ setup(
         'opencv-python>=4.7.0',
         # RealESRGAN model
         'py_real_esrgan>=0.0.3',
+        # huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires
+        'huggingface_hub<0.16.0',
         # Progress display
         'tqdm>=4.64.0',
         # PyTorch (user must install appropriate variant separately)
