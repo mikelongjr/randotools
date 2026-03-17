@@ -156,10 +156,10 @@ class UpscaleWorker(QThread):
         # images to disk while the GPU processes the next frame. This keeps
         # the GPU fully fed and overlaps both I/O directions with computation.
         # ------------------------------------------------------------------
-        _PREFETCH = 4  # max frames buffered between each stage
+        _QUEUE_DEPTH = 8  # max frames buffered between loader→GPU and GPU→saver stages
 
-        load_q: _queue.Queue = _queue.Queue(maxsize=_PREFETCH)
-        save_q: _queue.Queue = _queue.Queue(maxsize=_PREFETCH)
+        load_q: _queue.Queue = _queue.Queue(maxsize=_QUEUE_DEPTH)
+        save_q: _queue.Queue = _queue.Queue(maxsize=_QUEUE_DEPTH)
 
         def _loader() -> None:
             """Stage 1: read each source image from disk into a PIL Image."""
@@ -683,6 +683,11 @@ class MainWindow(QMainWindow):
     - Right panel: input/output preview
     """
 
+    # Minimum interval between output-preview refreshes during a batch run.
+    # Loading and smooth-scaling a 4× upscaled image (e.g. 7680×4320) on the
+    # main thread can take several seconds; throttling prevents event-loop stalls.
+    _PREVIEW_REFRESH_INTERVAL = 2.0  # seconds
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("RealESRGAN Upscaler v2.0")
@@ -697,6 +702,9 @@ class MainWindow(QMainWindow):
         self._worker: Optional[UpscaleWorker] = None
         self._thermal_timer: Optional[QTimer] = None
         self._active_output_dir: str = ""  # set in _start_processing to the model-suffixed dir
+        # Throttle output preview updates: loading+scaling a 4× upscaled image on the
+        # main thread is expensive.  See _PREVIEW_REFRESH_INTERVAL.
+        self._last_preview_time: float = 0.0
 
         # Power manager (lazy-initialised on first run)
         self._power_mgr = None
@@ -1218,7 +1226,9 @@ class MainWindow(QMainWindow):
         item = self._queue_item_map.get(filename)
         if item is not None:
             item.set_status(QueueItem.STATUS_PROCESSING)
-            self._queue_list.scrollToItem(item)
+            # Don't call scrollToItem here: with large queues (100k+ files) it
+            # forces Qt to recalculate every item's position on every file start,
+            # which can block the event loop long enough to trigger "Not Responding".
 
     def _on_progress(self, completed: int, total: int, filename: str, eta_s: float) -> None:
         self._progress_bar.setValue(completed)
@@ -1232,8 +1242,15 @@ class MainWindow(QMainWindow):
         if item is not None:
             item.set_status(QueueItem.STATUS_DONE if success else QueueItem.STATUS_ERROR)
             if success and self._preview_out:
-                out_path = os.path.join(self._active_output_dir, filename)
-                self._preview_out.show_image(out_path)
+                # Loading and smooth-scaling a 4× upscaled image (e.g. 7680×4320)
+                # on the main thread is expensive enough to freeze the UI when files
+                # complete in rapid succession.  Only refresh the preview at most
+                # once every _PREVIEW_REFRESH_INTERVAL seconds.
+                now = time.monotonic()
+                if now - self._last_preview_time >= self._PREVIEW_REFRESH_INTERVAL:
+                    self._last_preview_time = now
+                    out_path = os.path.join(self._active_output_dir, filename)
+                    self._preview_out.show_image(out_path)
 
         if not success:
             self._log_message(f"❌ {filename}: {error}")
