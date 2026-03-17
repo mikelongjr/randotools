@@ -122,7 +122,12 @@ class UpscaleWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:
-        from upscaler.upscale_engine import UpscaleEngine, UpscaleJob
+        import queue as _queue
+        import threading as _threading
+
+        import torch  # type: ignore
+        from PIL import Image  # type: ignore
+        from upscaler.upscale_engine import UpscaleEngine
 
         self.log_message.emit(f"Loading model '{self.model_name}' on {self.device_string}…")
 
@@ -141,47 +146,120 @@ class UpscaleWorker(QThread):
             return
 
         self.log_message.emit(f"✔ Model loaded. Processing {len(self.input_files)} file(s)…")
-
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # ------------------------------------------------------------------
+        # 3-stage pipeline: loader → GPU loop → saver
+        #
+        # The loader thread pre-reads images from disk while the GPU is busy
+        # processing the previous frame. The saver thread writes finished
+        # images to disk while the GPU processes the next frame. This keeps
+        # the GPU fully fed and overlaps both I/O directions with computation.
+        # ------------------------------------------------------------------
+        _PREFETCH = 4  # max frames buffered between each stage
+
+        load_q: _queue.Queue = _queue.Queue(maxsize=_PREFETCH)
+        save_q: _queue.Queue = _queue.Queue(maxsize=_PREFETCH)
+
+        def _loader() -> None:
+            """Stage 1: read each source image from disk into a PIL Image."""
+            for src in self.input_files:
+                if self._cancel:
+                    break
+                try:
+                    img = Image.open(src).convert("RGB")
+                    err: Optional[str] = None
+                except Exception as exc:
+                    img = None
+                    err = str(exc)
+                load_q.put((src, img, err))
+            load_q.put(None)  # sentinel
+
+        def _saver() -> None:
+            """Stage 3: save finished images to disk and emit completion signals."""
+            total_s = 0.0
+            saved = 0
+            while True:
+                entry = save_q.get()
+                if entry is None:
+                    break
+                sr_image, dst, filename, idx, total, success, infer_error, t_start_item = entry
+                final_success = success
+                final_error = infer_error
+                if success:
+                    try:
+                        sr_image.save(dst)
+                    except Exception as exc:
+                        final_success = False
+                        final_error = str(exc)
+                        self.log_message.emit(f"❌ Save failed [{filename}]: {exc}")
+                # Measure end-to-end time (GPU inference + save) for accurate ETA
+                elapsed_item = time.perf_counter() - t_start_item
+                total_s += elapsed_item
+                saved += 1
+                avg = total_s / saved
+                remaining = total - idx - 1
+                eta = avg * remaining
+                # job_done and progress are emitted from this background thread;
+                # PyQt6 marshals cross-thread emissions via the queued connection.
+                self.job_done.emit(filename, final_success, final_error)
+                self.progress.emit(idx + 1, total, filename, eta)
+
+        loader_t = _threading.Thread(target=_loader, daemon=True)
+        saver_t = _threading.Thread(target=_saver, daemon=True)
+        loader_t.start()
+        saver_t.start()
+
+        # ------------------------------------------------------------------
+        # Stage 2: GPU inference loop (runs on the QThread)
+        # ------------------------------------------------------------------
         t_start = time.perf_counter()
         succeeded = 0
         failed = 0
-        times: List[float] = []
+        idx = 0
 
-        for idx, src in enumerate(self.input_files):
-            if self._cancel:
-                self.log_message.emit("⛔ Batch cancelled by user.")
-                break
+        while True:
+            item = load_q.get()
+            if item is None:
+                break  # loader finished normally
 
+            src, img, load_error = item
             filename = os.path.basename(src)
             dst = os.path.join(self.output_dir, filename)
+            t_item = time.perf_counter()
 
             self.job_started.emit(filename)
 
-            job = UpscaleJob(
-                input_path=src,
-                output_path=dst,
-                model_name=self.model_name,
-            )
+            if load_error:
+                success = False
+                error = load_error
+                sr_image = None
+            else:
+                try:
+                    sr_image = engine.infer_image(img)
+                    success = True
+                    error = ""
+                except Exception as exc:
+                    success = False
+                    error = str(exc)
+                    sr_image = None
 
-            t_job = time.perf_counter()
-            engine.process_job(job)
-            elapsed_job = time.perf_counter() - t_job
-            times.append(elapsed_job)
-
-            if job.success:
+            if success:
                 succeeded += 1
             else:
                 failed += 1
 
-            self.job_done.emit(filename, job.success, job.error)
+            # Hand off to saver; pass t_item so it can measure end-to-end time
+            save_q.put((sr_image, dst, filename, idx, len(self.input_files),
+                        success, error, t_item))
+            idx += 1
 
-            # ETA calculation
-            avg = sum(times) / len(times)
-            remaining = len(self.input_files) - (idx + 1)
-            eta = avg * remaining
+            if self._cancel:
+                self.log_message.emit("⛔ Batch cancelled by user.")
+                break
 
-            self.progress.emit(idx + 1, len(self.input_files), filename, eta)
+        save_q.put(None)  # sentinel for saver
+        saver_t.join()    # wait for all pending saves to complete
 
         engine.unload_model()
         elapsed = time.perf_counter() - t_start

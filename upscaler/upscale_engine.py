@@ -254,6 +254,22 @@ class UpscaleEngine:
     # Processing
     # ------------------------------------------------------------------
 
+    def infer_image(self, image: "PIL.Image.Image") -> "PIL.Image.Image":
+        """
+        Run GPU inference on a pre-loaded PIL Image and return the upscaled PIL Image.
+
+        Separating I/O from inference allows callers to pipeline image loading and
+        saving on background threads while keeping the GPU continuously busy.
+        """
+        import torch  # type: ignore
+
+        if self._model is None:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        with self._model_lock:
+            with torch.inference_mode():
+                return self._model.predict(image)
+
     def process_job(self, job: UpscaleJob) -> UpscaleJob:
         """
         Upscale a single image file described by *job*.
