@@ -23,9 +23,13 @@ py_real_esrgan>=0.0.3
 # huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires
 huggingface_hub<0.16.0
 
-# BasicSR (optional – enables additional model variants)
-# basicsr>=1.4.2   # Uncomment after installing build dependencies:
-#                  #   sudo dnf install gcc-c++ python3-devel
+# BasicSR (optional – enables additional model variants: anime_6B, general-x4v3)
+# Well-known issue: basicsr uses `git describe` to detect its own version at build
+# time.  Outside a git checkout this fails.  Workaround:
+#   SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 CUDA_VISIBLE_DEVICES='' pip install basicsr
+# Uncomment the line below only after installing build dependencies:
+#   sudo dnf install gcc-c++ python3-devel
+# basicsr>=1.4.2
 
 # Progress and CLI utilities
 tqdm>=4.64.0

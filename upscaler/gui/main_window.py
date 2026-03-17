@@ -376,11 +376,19 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _basicsr_available() -> bool:
-        """Return True if the basicsr package can be imported."""
+        """Return True if basicsr and its required arch modules can be imported.
+
+        A partially-installed basicsr (e.g. when its setup.py crashed during
+        the version-detection step) can be importable at the top level but
+        raise AttributeError (on __version__), pkg_resources.VersionConflict,
+        or other non-ImportError exceptions when the arch sub-modules are
+        accessed.  We probe the actual arch we need and catch all exceptions
+        to treat any failure as "not available".
+        """
         try:
-            import basicsr  # noqa: F401  # type: ignore
+            from basicsr.archs.rrdbnet_arch import RRDBNet  # noqa: F401  # type: ignore
             return True
-        except ImportError:
+        except Exception:  # ImportError, AttributeError, VersionConflict, etc.
             return False
 
     def _setup_ui(self) -> None:

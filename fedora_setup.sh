@@ -196,11 +196,41 @@ install_python_deps() {
     pip install py_real_esrgan
 
     # BasicSR (optional, requires build tools)
+    # Well-known issue: basicsr's setup.py calls `git describe` to determine its own
+    # version.  Outside a git checkout (or in a shallow clone without tags) this
+    # crashes with "returned non-zero exit status 128".  We work around it by
+    # supplying a fake version via SETUPTOOLS_SCM_PRETEND_VERSION so the build
+    # system never has to run git at all.
     if command -v gcc &>/dev/null && command -v g++ &>/dev/null; then
         info "Installing BasicSR (enables additional model variants)…"
-        CUDA_VISIBLE_DEVICES='' pip install basicsr 2>/dev/null && \
-            success "BasicSR installed." || \
+
+        _install_basicsr() {
+            # SETUPTOOLS_SCM_PRETEND_VERSION: the value is passed as a fake
+            # version string so setuptools_scm never invokes `git describe`.
+            # Keep this in sync with the version comment in requirements.txt.
+            # 1.4.2 is the latest stable release of basicsr.
+            # Attempt 1 – standard install with version-detection bypass
+            SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 \
+                CUDA_VISIBLE_DEVICES='' \
+                pip install basicsr \
+                && return 0
+
+            warn "BasicSR: first attempt failed; retrying with --no-build-isolation…"
+            # Attempt 2 – skip PEP 517 isolation so the host setuptools is used
+            SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 \
+                CUDA_VISIBLE_DEVICES='' \
+                pip install basicsr --no-build-isolation \
+                && return 0
+
+            return 1
+        }
+
+        if _install_basicsr; then
+            success "BasicSR installed."
+        else
             warn "BasicSR installation failed (optional — standard models still work)."
+            warn "To install manually:  SETUPTOOLS_SCM_PRETEND_VERSION=1.4.2 CUDA_VISIBLE_DEVICES='' pip install basicsr"
+        fi
     fi
 
     success "Python dependencies installed."

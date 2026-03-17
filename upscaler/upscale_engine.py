@@ -153,15 +153,19 @@ class UpscaleEngine:
         scale = self._infer_scale()
 
         # Optional basicsr architectures
+        # Note: a partially-installed basicsr can raise various errors beyond
+        # ImportError — for example AttributeError (on __version__) or
+        # pkg_resources.VersionConflict — when the arch sub-modules are loaded.
+        # Catch broadly so the app still runs without basicsr in all failure modes.
         RRDBNet = None
         SRVGGNetCompact = None
         try:
             from basicsr.archs.rrdbnet_arch import RRDBNet  # type: ignore
-        except ImportError:
+        except Exception:  # ImportError, AttributeError, VersionConflict, etc.
             pass
         try:
             from basicsr.archs.srvgg_arch import SRVGGNetCompact  # type: ignore
-        except ImportError:
+        except Exception:  # ImportError, AttributeError, VersionConflict, etc.
             pass
 
         from py_real_esrgan.model import RealESRGAN  # type: ignore
