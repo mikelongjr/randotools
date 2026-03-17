@@ -120,24 +120,40 @@ class Config:
             "description": "2× upscaling — general photos",
             "filename": "RealESRGAN_x2plus.pth",
             "requires_basicsr": False,
+            "url": (
+                "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+                "v0.2.1/RealESRGAN_x2plus.pth"
+            ),
         },
         "RealESRGAN_x4plus": {
             "scale": 4,
             "description": "4× upscaling — general photos (high quality)",
             "filename": "RealESRGAN_x4plus.pth",
             "requires_basicsr": False,
+            "url": (
+                "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+                "v0.1.0/RealESRGAN_x4plus.pth"
+            ),
         },
         "RealESRGAN_x4plus_anime_6B": {
             "scale": 4,
             "description": "4× upscaling — anime / illustration",
             "filename": "RealESRGAN_x4plus_anime_6B.pth",
             "requires_basicsr": True,
+            "url": (
+                "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+                "v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
+            ),
         },
         "realesr-general-x4v3": {
             "scale": 4,
             "description": "4× upscaling — general (fast variant)",
             "filename": "realesr-general-x4v3.pth",
             "requires_basicsr": True,
+            "url": (
+                "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+                "v0.2.5.0/realesr-general-x4v3.pth"
+            ),
         },
     }
 

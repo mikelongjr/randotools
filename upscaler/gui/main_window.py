@@ -331,6 +331,263 @@ class DiagnosticsDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Model download worker + dialog
+# ---------------------------------------------------------------------------
+
+
+class ModelDownloadWorker(QThread):
+    """Background QThread that downloads one or more model weight files.
+
+    Signals
+    -------
+    progress(model_key, percent)
+        Emitted periodically while each file is downloading.
+    log_message(text)
+        Human-readable status lines.
+    finished_all()
+        Emitted once when every queued download has completed or failed.
+    """
+
+    progress = pyqtSignal(str, int)   # model_key, percent 0-100
+    log_message = pyqtSignal(str)
+    finished_all = pyqtSignal()
+
+    def __init__(self, tasks: list, parent=None) -> None:
+        """
+        Parameters
+        ----------
+        tasks:
+            List of ``(url, dest_path, model_key)`` tuples.
+        """
+        super().__init__(parent)
+        self._tasks = tasks
+
+    def run(self) -> None:
+        import urllib.request
+
+        for url, dest_path, model_key in self._tasks:
+            self.log_message.emit(f"Downloading {model_key}…")
+            tmp_path = dest_path + ".tmp"
+            try:
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+                def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
+                    if total_size > 0:
+                        pct = min(100, block_num * block_size * 100 // total_size)
+                        self.progress.emit(model_key, pct)
+
+                urllib.request.urlretrieve(url, tmp_path, reporthook=_reporthook)
+                os.replace(tmp_path, dest_path)
+                self.progress.emit(model_key, 100)
+                self.log_message.emit(f"✅ {model_key} saved to {dest_path}")
+            except Exception as exc:
+                self.log_message.emit(f"❌ Failed to download {model_key}: {exc}")
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+        self.finished_all.emit()
+
+
+class ModelDownloaderDialog(QDialog):
+    """Dialog that lets the user download Real-ESRGAN model weights.
+
+    Each model row shows its current on-disk status and offers a per-model
+    download button.  A "Download All Missing" shortcut downloads every model
+    that is not yet present.
+    """
+
+    def __init__(self, config: Config, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Download Models")
+        self.setMinimumWidth(720)
+        self.setMinimumHeight(480)
+        self._config = config
+        self._worker: Optional[ModelDownloadWorker] = None
+        # model_key -> (status_label, progress_bar, download_btn)
+        self._row_widgets: dict = {}
+        self._setup_ui()
+        self._refresh_status()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _weights_dir(self) -> str:
+        """Return the directory where weight files are (or should be) stored."""
+        if self._config.weights_dir and os.path.isdir(self._config.weights_dir):
+            return self._config.weights_dir
+        # Derive from config module location: upscaler/weights/
+        import upscaler.config as _cfg_mod
+        pkg_dir = os.path.dirname(os.path.abspath(_cfg_mod.__file__))
+        return os.path.join(pkg_dir, "weights")
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "Download Real-ESRGAN model weights from the official GitHub releases.<br>"
+            "Files are saved to the <b>weights</b> directory inside the package."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(info)
+
+        # Table header
+        header_layout = QGridLayout()
+        header_layout.setColumnStretch(0, 3)
+        header_layout.setColumnStretch(1, 4)
+        header_layout.setColumnStretch(2, 1)
+        header_layout.setColumnStretch(3, 3)
+        header_layout.setColumnStretch(4, 2)
+        for col, text in enumerate(["Model", "Description", "Scale", "Status", "Action"]):
+            lbl = QLabel(f"<b>{text}</b>")
+            header_layout.addWidget(lbl, 0, col)
+        layout.addLayout(header_layout)
+
+        # One row per model
+        rows_layout = QGridLayout()
+        rows_layout.setColumnStretch(0, 3)
+        rows_layout.setColumnStretch(1, 4)
+        rows_layout.setColumnStretch(2, 1)
+        rows_layout.setColumnStretch(3, 3)
+        rows_layout.setColumnStretch(4, 2)
+
+        for row_idx, (key, info_dict) in enumerate(Config.MODELS.items()):
+            rows_layout.addWidget(QLabel(key), row_idx, 0)
+            rows_layout.addWidget(QLabel(info_dict["description"]), row_idx, 1)
+            rows_layout.addWidget(QLabel(f"{info_dict['scale']}×"), row_idx, 2)
+
+            status_lbl = QLabel()
+            rows_layout.addWidget(status_lbl, row_idx, 3)
+
+            btn = QPushButton("Download")
+            btn.setFixedWidth(100)
+            btn.clicked.connect(lambda checked, k=key: self._start_single(k))
+            rows_layout.addWidget(btn, row_idx, 4)
+
+            self._row_widgets[key] = (status_lbl, btn)
+
+        layout.addLayout(rows_layout)
+
+        # Download all missing
+        btn_all = QPushButton("⬇  Download All Missing")
+        btn_all.clicked.connect(self._download_all_missing)
+        layout.addWidget(btn_all)
+        self._btn_all = btn_all
+
+        layout.addSpacing(4)
+
+        # Activity log
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(130)
+        self._log.setFont(QFont("monospace", 9))
+        layout.addWidget(self._log)
+
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # ------------------------------------------------------------------
+    # Status refresh
+    # ------------------------------------------------------------------
+
+    def _refresh_status(self) -> None:
+        weights_dir = self._weights_dir()
+        for key, (status_lbl, btn) in self._row_widgets.items():
+            filename = Config.MODELS[key]["filename"]
+            path = os.path.join(weights_dir, filename)
+            if os.path.isfile(path):
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                status_lbl.setText(f"✅ Downloaded ({size_mb:.0f} MB)")
+                status_lbl.setStyleSheet("color: green;")
+                btn.setText("Re-download")
+            else:
+                status_lbl.setText("⬇  Not downloaded")
+                status_lbl.setStyleSheet("color: #cc7700;")
+                btn.setText("Download")
+
+    # ------------------------------------------------------------------
+    # Download orchestration
+    # ------------------------------------------------------------------
+
+    def _start_single(self, model_key: str) -> None:
+        url = Config.MODELS[model_key].get("url", "")
+        if not url:
+            QMessageBox.warning(
+                self, "No URL",
+                f"No download URL configured for model '{model_key}'."
+            )
+            return
+        weights_dir = self._weights_dir()
+        dest = os.path.join(weights_dir, Config.MODELS[model_key]["filename"])
+        self._run_downloads([(url, dest, model_key)])
+
+    def _download_all_missing(self) -> None:
+        weights_dir = self._weights_dir()
+        tasks = []
+        for key, info_dict in Config.MODELS.items():
+            dest = os.path.join(weights_dir, info_dict["filename"])
+            url = info_dict.get("url", "")
+            if not os.path.isfile(dest) and url:
+                tasks.append((url, dest, key))
+        if not tasks:
+            self._log_msg("All models are already downloaded.")
+            return
+        self._run_downloads(tasks)
+
+    def _run_downloads(self, tasks: list) -> None:
+        if self._worker and self._worker.isRunning():
+            QMessageBox.warning(
+                self, "Download in Progress",
+                "A download is already in progress. Please wait."
+            )
+            return
+
+        # Disable all download buttons while running
+        self._set_buttons_enabled(False)
+
+        self._worker = ModelDownloadWorker(tasks, parent=self)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.log_message.connect(self._log_msg)
+        self._worker.finished_all.connect(self._on_all_done)
+        self._worker.start()
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        for _, (_, btn) in self._row_widgets.items():
+            btn.setEnabled(enabled)
+        self._btn_all.setEnabled(enabled)
+
+    # ------------------------------------------------------------------
+    # Signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_progress(self, model_key: str, percent: int) -> None:
+        if model_key in self._row_widgets:
+            status_lbl, _ = self._row_widgets[model_key]
+            status_lbl.setText(f"⬇  Downloading… {percent}%")
+            status_lbl.setStyleSheet("color: #0055cc;")
+
+    def _on_all_done(self) -> None:
+        self._set_buttons_enabled(True)
+        self._refresh_status()
+
+    def _log_msg(self, text: str) -> None:
+        self._log.append(text)
+        self._log.verticalScrollBar().setValue(
+            self._log.verticalScrollBar().maximum()
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main Window
 # ---------------------------------------------------------------------------
 
@@ -614,6 +871,10 @@ class MainWindow(QMainWindow):
         act_diag.triggered.connect(self._show_diagnostics)
         tools_menu.addAction(act_diag)
 
+        act_download = QAction("⬇ &Download Models…", self)
+        act_download.triggered.connect(self._show_model_downloader)
+        tools_menu.addAction(act_download)
+
         act_cfg = QAction("Open Config &Folder…", self)
         act_cfg.triggered.connect(self._open_config_folder)
         tools_menu.addAction(act_cfg)
@@ -645,6 +906,10 @@ class MainWindow(QMainWindow):
         act_diag = QAction("🔍 Diagnostics", self)
         act_diag.triggered.connect(self._show_diagnostics)
         tb.addAction(act_diag)
+
+        act_download = QAction("⬇ Models", self)
+        act_download.triggered.connect(self._show_model_downloader)
+        tb.addAction(act_download)
 
     def _setup_statusbar(self) -> None:
         sb = self.statusBar()
@@ -950,6 +1215,10 @@ class MainWindow(QMainWindow):
     def _show_diagnostics(self) -> None:
         report = self._gpu_manager.run_diagnostics()
         dlg = DiagnosticsDialog(report, self)
+        dlg.exec()
+
+    def _show_model_downloader(self) -> None:
+        dlg = ModelDownloaderDialog(self._config, self)
         dlg.exec()
 
     def _open_config_folder(self) -> None:
