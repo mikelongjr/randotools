@@ -866,6 +866,12 @@ class MainWindow(QMainWindow):
         self._queue_list = QListWidget()
         self._queue_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self._queue_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        # With 100k+ items, Qt recomputes the layout (calls sizeHint() on every
+        # item) whenever any item's text changes — unless all items have a
+        # uniform size.  Without this flag each set_status() call during batch
+        # processing triggers an O(n) layout pass that blocks the GUI thread for
+        # 1–3 seconds on older CPUs, causing "Not Responding" dialogs.
+        self._queue_list.setUniformItemSizes(True)
         self._queue_list.itemClicked.connect(self._on_queue_item_clicked)
         queue_inner.addWidget(self._queue_list)
 
