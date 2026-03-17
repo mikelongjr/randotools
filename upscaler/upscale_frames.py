@@ -25,6 +25,16 @@ except ModuleNotFoundError:
 # help(realesrgan.models)
 # sys.exit()
 # sys.modules['realesrgan'] = sys.modules['py_real_esrgan']
+
+# Fix: huggingface_hub >= 0.16 removed cached_download which py_real_esrgan uses.
+# Patch it back as an alias for hf_hub_download before importing py_real_esrgan.
+try:
+    from huggingface_hub import cached_download  # noqa: F401
+except ImportError:
+    import huggingface_hub
+    from huggingface_hub import hf_hub_download
+    huggingface_hub.cached_download = hf_hub_download
+
 from py_real_esrgan.model import RealESRGAN
 
 # from realesrgan.models import RealESRGAN

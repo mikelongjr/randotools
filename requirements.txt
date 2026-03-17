@@ -20,6 +20,9 @@ opencv-python>=4.7.0
 # RealESRGAN model
 py_real_esrgan>=0.0.3
 
+# huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires
+huggingface_hub<0.16.0
+
 # BasicSR (optional – enables additional model variants)
 # basicsr>=1.4.2   # Uncomment after installing build dependencies:
 #                  #   sudo dnf install gcc-c++ python3-devel

@@ -47,6 +47,20 @@ except (ModuleNotFoundError, ImportError):
     except ImportError:
         pass
 
+# ---------------------------------------------------------------------------
+# huggingface_hub compatibility shim for py_real_esrgan
+# huggingface_hub >= 0.16 removed cached_download; alias it to hf_hub_download
+# ---------------------------------------------------------------------------
+try:
+    from huggingface_hub import cached_download  # noqa: F401
+except ImportError:
+    try:
+        import huggingface_hub as _hf
+        from huggingface_hub import hf_hub_download as _hf_dl
+        _hf.cached_download = _hf_dl
+    except ImportError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Data structures

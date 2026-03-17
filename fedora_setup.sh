@@ -190,7 +190,10 @@ install_python_deps() {
     esac
 
     # Install remaining requirements
-    pip install PyQt6 Pillow opencv-python py_real_esrgan tqdm
+    pip install PyQt6 Pillow opencv-python tqdm
+    # huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires; pin before installing it
+    pip install "huggingface_hub<0.16.0"
+    pip install py_real_esrgan
 
     # BasicSR (optional, requires build tools)
     if command -v gcc &>/dev/null && command -v g++ &>/dev/null; then
@@ -246,6 +249,16 @@ verify_installation() {
 
     python3 - <<'PYEOF'
 import sys
+
+# Fix: huggingface_hub >= 0.16 removed cached_download; patch it back as an alias
+# for hf_hub_download before importing py_real_esrgan.
+try:
+    from huggingface_hub import cached_download  # noqa: F401
+except ImportError:
+    import huggingface_hub
+    from huggingface_hub import hf_hub_download
+    huggingface_hub.cached_download = hf_hub_download
+
 errors = []
 
 try:
