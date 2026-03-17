@@ -1129,11 +1129,14 @@ class MainWindow(QMainWindow):
         self._eta_label.setText(f"ETA: {eta_str}")
         self._status_label.setText(f"Processing {completed}/{total}: {filename}")
 
-        # Mark current item
+        # Mark current item as Processing — but never overwrite a Done/Error status
+        # that was already set by _on_job_done (job_done signal is emitted before
+        # progress in the worker, so both may arrive in the same event-loop flush).
         for i in range(self._queue_list.count()):
             item = self._queue_list.item(i)
             if isinstance(item, QueueItem) and item.filename == filename:
-                item.set_status(QueueItem.STATUS_PROCESSING)
+                if item._status not in (QueueItem.STATUS_DONE, QueueItem.STATUS_ERROR):
+                    item.set_status(QueueItem.STATUS_PROCESSING)
                 self._queue_list.scrollToItem(item)
                 break
 
@@ -1164,6 +1167,14 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Done: {succeeded}/{succeeded + failed} succeeded")
         self._progress_bar.setValue(self._progress_bar.maximum())
         self._eta_label.setText("ETA: done")
+
+        # Safety net: any item still stuck on "Processing" by the time the batch
+        # finishes must have completed (job_done fires before progress in the
+        # worker, so a stuck item was processed successfully).
+        for i in range(self._queue_list.count()):
+            item = self._queue_list.item(i)
+            if isinstance(item, QueueItem) and item._status == QueueItem.STATUS_PROCESSING:
+                item.set_status(QueueItem.STATUS_DONE)
 
         if failed > 0:
             QMessageBox.warning(
