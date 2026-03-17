@@ -37,6 +37,7 @@ from PyQt6.QtGui import (
     QDropEvent,
     QFont,
     QIcon,
+    QImage,
     QKeySequence,
     QPalette,
     QPixmap,
@@ -381,6 +382,41 @@ class ThermalWidget(QFrame):
 
 
 # ---------------------------------------------------------------------------
+# Background image loader for preview panels
+# ---------------------------------------------------------------------------
+
+
+class _PreviewLoaderThread(QThread):
+    """Background thread that loads and scales a preview image off the GUI thread.
+
+    ``QImage`` (unlike ``QPixmap``) can safely be constructed and scaled from
+    non-GUI threads.  The caller blocks signals on the previous loader so that
+    stale results never overwrite a newer request.  Once the scaled image is
+    ready it is emitted via a signal; the GUI thread converts it to a
+    ``QPixmap`` (a near-instantaneous operation) and updates the label.
+    """
+
+    image_ready = pyqtSignal(QImage)
+
+    def __init__(self, path: str, target_w: int, target_h: int, parent=None) -> None:
+        super().__init__(parent)
+        self._path = path
+        self._target_w = max(1, target_w)
+        self._target_h = max(1, target_h)
+
+    def run(self) -> None:
+        image = QImage(self._path)
+        if image.isNull():
+            return
+        scaled = image.scaled(
+            QSize(self._target_w, self._target_h),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_ready.emit(scaled)
+
+
+# ---------------------------------------------------------------------------
 # Preview panel
 # ---------------------------------------------------------------------------
 
@@ -407,20 +443,39 @@ class PreviewPanel(QScrollArea):
         self._layout.addWidget(self._image_label)
         self.setWidget(self._container)
 
+        # Background loader thread — keeps the GUI thread free during disk I/O
+        # and PNG decompression (which can take several seconds for large images
+        # on older CPUs).
+        self._loader: Optional[_PreviewLoaderThread] = None
+
     def show_image(self, path: str) -> None:
         if not os.path.isfile(path):
             return
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
+        # If a load is already in flight, suppress its (now-stale) result and
+        # skip starting a new one.  The caller's throttle (e.g. 2-second preview
+        # refresh interval) ensures another request will arrive soon, so the
+        # preview stays reasonably current without accumulating threads.
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.blockSignals(True)
             return
-        scaled = pixmap.scaled(
-            QSize(self._image_label.width() - 8, self._image_label.height() - 8),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._image_label.setPixmap(scaled)
+        w = max(1, self._image_label.width() - 8)
+        h = max(1, self._image_label.height() - 8)
+        self._loader = _PreviewLoaderThread(path, w, h, parent=self)
+        self._loader.image_ready.connect(self._on_image_loaded)
+        self._loader.start()
+
+    def _on_image_loaded(self, image: QImage) -> None:
+        """Receive the scaled QImage from the loader thread and display it.
+
+        QPixmap.fromImage() is fast (no I/O, no decompression) and is safe to
+        call on the GUI thread; all the expensive work happened in the thread.
+        """
+        self._image_label.setPixmap(QPixmap.fromImage(image))
 
     def clear(self) -> None:
+        # Cancel any in-progress load so its result doesn't appear after clear.
+        if self._loader is not None:
+            self._loader.blockSignals(True)
         self._image_label.setPixmap(QPixmap())
         self._image_label.setText("No image loaded")
 
