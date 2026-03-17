@@ -93,6 +93,7 @@ class UpscaleWorker(QThread):
     log_message(text)
     """
 
+    job_started = pyqtSignal(str)                  # filename
     progress = pyqtSignal(int, int, str, float)   # completed, total, filename, eta_s
     job_done = pyqtSignal(str, bool, str)          # filename, success, error
     finished = pyqtSignal(int, int, float)         # succeeded, failed, elapsed_s
@@ -154,6 +155,8 @@ class UpscaleWorker(QThread):
 
             filename = os.path.basename(src)
             dst = os.path.join(self.output_dir, filename)
+
+            self.job_started.emit(filename)
 
             job = UpscaleJob(
                 input_path=src,
@@ -1091,11 +1094,13 @@ class MainWindow(QMainWindow):
         self._btn_cancel.setEnabled(True)
         self._log_message(f"Starting batch: {len(files)} file(s) → {output_dir}")
 
-        # Reset queue item statuses
+        # Reset queue item statuses and build O(1) lookup dict for signal handlers
+        self._queue_item_map: dict[str, "QueueItem"] = {}
         for i in range(self._queue_list.count()):
             item = self._queue_list.item(i)
             if isinstance(item, QueueItem):
                 item.set_status(QueueItem.STATUS_PENDING)
+                self._queue_item_map[item.filename] = item
 
         # Launch worker
         self._worker = UpscaleWorker(
@@ -1106,6 +1111,7 @@ class MainWindow(QMainWindow):
             weights_path=weights_path,
             use_half=self._half_cb.isChecked(),
         )
+        self._worker.job_started.connect(self._on_job_started)
         self._worker.progress.connect(self._on_progress)
         self._worker.job_done.connect(self._on_job_done)
         self._worker.finished.connect(self._on_batch_finished)
@@ -1122,6 +1128,12 @@ class MainWindow(QMainWindow):
     # Worker signal handlers
     # ------------------------------------------------------------------
 
+    def _on_job_started(self, filename: str) -> None:
+        item = self._queue_item_map.get(filename)
+        if item is not None:
+            item.set_status(QueueItem.STATUS_PROCESSING)
+            self._queue_list.scrollToItem(item)
+
     def _on_progress(self, completed: int, total: int, filename: str, eta_s: float) -> None:
         self._progress_bar.setValue(completed)
         self._progress_bar.setMaximum(total)
@@ -1129,28 +1141,13 @@ class MainWindow(QMainWindow):
         self._eta_label.setText(f"ETA: {eta_str}")
         self._status_label.setText(f"Processing {completed}/{total}: {filename}")
 
-        # Mark current item as Processing — but never overwrite a Done/Error status
-        # that was already set by _on_job_done (job_done signal is emitted before
-        # progress in the worker, so both may arrive in the same event-loop flush).
-        for i in range(self._queue_list.count()):
-            item = self._queue_list.item(i)
-            if isinstance(item, QueueItem) and item.filename == filename:
-                if item._status not in (QueueItem.STATUS_DONE, QueueItem.STATUS_ERROR):
-                    item.set_status(QueueItem.STATUS_PROCESSING)
-                self._queue_list.scrollToItem(item)
-                break
-
     def _on_job_done(self, filename: str, success: bool, error: str) -> None:
-        # Mark item done/error
-        for i in range(self._queue_list.count()):
-            item = self._queue_list.item(i)
-            if isinstance(item, QueueItem) and item.filename == filename:
-                item.set_status(QueueItem.STATUS_DONE if success else QueueItem.STATUS_ERROR)
-                # Show output preview for first completed file
-                if success and self._preview_out:
-                    out_path = os.path.join(self._active_output_dir, filename)
-                    self._preview_out.show_image(out_path)
-                break
+        item = self._queue_item_map.get(filename)
+        if item is not None:
+            item.set_status(QueueItem.STATUS_DONE if success else QueueItem.STATUS_ERROR)
+            if success and self._preview_out:
+                out_path = os.path.join(self._active_output_dir, filename)
+                self._preview_out.show_image(out_path)
 
         if not success:
             self._log_message(f"❌ {filename}: {error}")
@@ -1167,14 +1164,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Done: {succeeded}/{succeeded + failed} succeeded")
         self._progress_bar.setValue(self._progress_bar.maximum())
         self._eta_label.setText("ETA: done")
-
-        # Safety net: any item still stuck on "Processing" by the time the batch
-        # finishes must have completed (job_done fires before progress in the
-        # worker, so a stuck item was processed successfully).
-        for i in range(self._queue_list.count()):
-            item = self._queue_list.item(i)
-            if isinstance(item, QueueItem) and item._status == QueueItem.STATUS_PROCESSING:
-                item.set_status(QueueItem.STATUS_DONE)
+        self._queue_item_map.clear()
 
         if failed > 0:
             QMessageBox.warning(
