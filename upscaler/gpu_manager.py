@@ -125,6 +125,8 @@ class GPUManager:
             # no environment variable override can fix this.
             if sys.platform == "linux" and cuda_ver and not hip_ver:
                 if self._amd_hardware_present():
+                    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+                    rocm_wheel_unsupported = sys.version_info >= (3, 13)
                     lines.append("")
                     lines.append("!" * 60)
                     lines.append("CRITICAL: Wrong PyTorch build for this hardware!")
@@ -132,20 +134,33 @@ class GPUManager:
                         f"  Installed : torch {torch.__version__}  (CUDA build — for NVIDIA GPUs)"
                     )
                     lines.append(
-                        "  Required  : torch with ROCm support (e.g. +rocm6.2 or later)"
+                        "  Required  : torch with ROCm support (e.g. +rocm6.2)"
                     )
                     lines.append("")
                     lines.append("  AMD GPUs are NOT usable with a CUDA-build PyTorch.")
                     lines.append("  Environment variables (HSA_OVERRIDE_GFX_VERSION, etc.)")
                     lines.append("  have no effect until the correct build is installed.")
                     lines.append("")
-                    lines.append("  Fix — reinstall PyTorch with ROCm support:")
+                    if rocm_wheel_unsupported:
+                        lines.append(
+                            f"  NOTE: Python {py_ver} is detected, but PyTorch ROCm wheels"
+                        )
+                        lines.append(
+                            "  are only published for Python 3.9–3.12. The setup script"
+                        )
+                        lines.append(
+                            "  will automatically install Python 3.12 and retry."
+                        )
+                        lines.append("")
+                    lines.append("  Fix — re-run the setup script (recommended):")
+                    lines.append("    ./fedora_setup.sh --amd")
+                    lines.append("    (tries rocm6.2 → rocm6.1 → rocm6.0 automatically)")
+                    lines.append("")
+                    lines.append("  Or manually reinstall PyTorch with ROCm support")
+                    lines.append("  (requires Python 3.12 or earlier in your venv):")
                     lines.append(
                         "    pip install torch torchvision "
                         "--index-url https://download.pytorch.org/whl/rocm6.2"
-                    )
-                    lines.append(
-                        "  Or re-run the setup script:  ./fedora_setup.sh --amd"
                     )
                     lines.append("!" * 60)
         else:

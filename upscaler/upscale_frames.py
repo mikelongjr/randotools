@@ -75,8 +75,11 @@ def run_diagnostics():
     # overrides (HSA_OVERRIDE_GFX_VERSION, HIP_VISIBLE_DEVICES) have NO effect
     # with a CUDA-build torch — a ROCm-build torch must be installed first.
     if cuda_ver and not hip_ver:
-        from upscaler.gpu_manager import GPUManager  # type: ignore
+        from upscaler.gpu_manager import GPUManager  # type: ignore  # optional dep
         if GPUManager._amd_hardware_present():
+            import sys as _sys
+            py_ver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
+            rocm_wheel_unsupported = _sys.version_info >= (3, 13)
             print("")
             print("!" * 40)
             print("CRITICAL: Wrong PyTorch build!")
@@ -86,10 +89,19 @@ def run_diagnostics():
             print("  AMD GPUs CANNOT be used with a CUDA-build PyTorch.")
             print("  No environment variable can fix this.")
             print("")
-            print("  Fix — reinstall PyTorch with ROCm support:")
+            if rocm_wheel_unsupported:
+                print(f"  NOTE: Python {py_ver} is active, but PyTorch ROCm wheels")
+                print("  are only available for Python 3.9–3.12. The setup script")
+                print("  will automatically install Python 3.12 and retry.")
+                print("")
+            print("  Fix — re-run the setup script (recommended):")
+            print("    ./fedora_setup.sh --amd")
+            print("    (tries rocm6.2 → rocm6.1 → rocm6.0 automatically)")
+            print("")
+            print("  Or manually reinstall PyTorch with ROCm support")
+            print("  (requires Python 3.12 or earlier in your venv):")
             print("    pip install torch torchvision \\")
             print("      --index-url https://download.pytorch.org/whl/rocm6.2")
-            print("  Or re-run:  ./fedora_setup.sh --amd")
             print("!" * 40)
             print("")
     
