@@ -66,7 +66,32 @@ def run_diagnostics():
     print("AMD GPU DIAGNOSTICS")
     print("="*40)
     print(f"PyTorch version: {torch.__version__}")
-    print(f"ROCm/HIP version: {getattr(torch.version, 'hip', 'N/A')}")
+    hip_ver = getattr(torch.version, 'hip', None)
+    cuda_ver = getattr(torch.version, 'cuda', None)
+    print(f"ROCm/HIP version: {hip_ver or 'N/A'}")
+
+    # Detect the most common AMD GPU setup failure: the CUDA build of PyTorch
+    # is installed on a machine with AMD GPU hardware.  The environment variable
+    # overrides (HSA_OVERRIDE_GFX_VERSION, HIP_VISIBLE_DEVICES) have NO effect
+    # with a CUDA-build torch — a ROCm-build torch must be installed first.
+    if cuda_ver and not hip_ver:
+        from upscaler.gpu_manager import GPUManager  # type: ignore
+        if GPUManager._amd_hardware_present():
+            print("")
+            print("!" * 40)
+            print("CRITICAL: Wrong PyTorch build!")
+            print(f"  Installed : torch {torch.__version__}  (CUDA build — for NVIDIA)")
+            print("  Required  : ROCm build  (e.g. +rocm6.2)")
+            print("")
+            print("  AMD GPUs CANNOT be used with a CUDA-build PyTorch.")
+            print("  No environment variable can fix this.")
+            print("")
+            print("  Fix — reinstall PyTorch with ROCm support:")
+            print("    pip install torch torchvision \\")
+            print("      --index-url https://download.pytorch.org/whl/rocm6.2")
+            print("  Or re-run:  ./fedora_setup.sh --amd")
+            print("!" * 40)
+            print("")
     
     # Check Group Permissions
     user = getpass.getuser()
@@ -226,9 +251,9 @@ def main():
         print("the ROCm version of PyTorch (check: pip list | grep torch).")
         print("\nPRO TIP: If your AMD GPU is present but not 'found', run the diagnostics")
         print("above to find each GPU's GFX version, then try one of:")
-        print("    HSA_OVERRIDE_GFX_VERSION=10.3.5 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # iGPU example")
-        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=2 python upscale_frames.py  # dGPU example")
-        print("    HSA_OVERRIDE_GFX_VERSION=11.0.3 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # Radeon 780M")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.5 HIP_VISIBLE_DEVICES=0 python upscale_frames.py  # iGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # dGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=11.0.3 HIP_VISIBLE_DEVICES=0 python upscale_frames.py  # Radeon 780M")
     print("---------------------------------------------------------------------------\n")
 
     # Determine which model will be used and build the output directory name

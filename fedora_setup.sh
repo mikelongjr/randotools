@@ -181,7 +181,7 @@ install_python_deps() {
             ;;
         amd)
             pip install torch torchvision \
-                --index-url https://download.pytorch.org/whl/rocm6.0 \
+                --index-url https://download.pytorch.org/whl/rocm6.2 \
                 || pip install torch torchvision
             ;;
         *)
@@ -397,8 +397,9 @@ print_summary() {
 
     if [[ "$detected_gpu" == "amd" ]]; then
         echo -e "${YELLOW}AMD GPU note:${NC}"
-        echo "  If PyTorch cannot see your GPU, try:"
-        echo "    HSA_OVERRIDE_GFX_VERSION=10.3.0 realesrgan-upscaler"
+        echo "  If PyTorch cannot see your GPU, run the app once to see diagnostics,"
+        echo "  then try the per-GPU override command shown there, e.g.:"
+        echo "    HSA_OVERRIDE_GFX_VERSION=10.3.5 realesrgan-upscaler"
         echo ""
     fi
 

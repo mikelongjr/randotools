@@ -118,6 +118,36 @@ class GPUManager:
                 lines.append(f"CUDA version     : {cuda_ver}")
             if hip_ver:
                 lines.append(f"ROCm/HIP version : {hip_ver}")
+
+            # Detect the most common AMD GPU setup failure: the user has installed
+            # the CUDA build of PyTorch (e.g. +cu128) on a machine with AMD GPU
+            # hardware.  The CUDA build cannot communicate with AMD GPUs at all —
+            # no environment variable override can fix this.
+            if sys.platform == "linux" and cuda_ver and not hip_ver:
+                if self._amd_hardware_present():
+                    lines.append("")
+                    lines.append("!" * 60)
+                    lines.append("CRITICAL: Wrong PyTorch build for this hardware!")
+                    lines.append(
+                        f"  Installed : torch {torch.__version__}  (CUDA build — for NVIDIA GPUs)"
+                    )
+                    lines.append(
+                        "  Required  : torch with ROCm support (e.g. +rocm6.2 or later)"
+                    )
+                    lines.append("")
+                    lines.append("  AMD GPUs are NOT usable with a CUDA-build PyTorch.")
+                    lines.append("  Environment variables (HSA_OVERRIDE_GFX_VERSION, etc.)")
+                    lines.append("  have no effect until the correct build is installed.")
+                    lines.append("")
+                    lines.append("  Fix — reinstall PyTorch with ROCm support:")
+                    lines.append(
+                        "    pip install torch torchvision "
+                        "--index-url https://download.pytorch.org/whl/rocm6.2"
+                    )
+                    lines.append(
+                        "  Or re-run the setup script:  ./fedora_setup.sh --amd"
+                    )
+                    lines.append("!" * 60)
         else:
             lines.append("PyTorch          : NOT AVAILABLE")
 
@@ -337,6 +367,37 @@ class GPUManager:
                 pass
 
         return None
+
+    @staticmethod
+    def _amd_hardware_present() -> bool:
+        """Return True if any AMD GPU node is found in the KFD topology.
+
+        This works regardless of which PyTorch build is installed, because it
+        reads directly from the kernel's KFD sysfs interface.
+        """
+        topology_root = "/sys/class/kfd/kfd/topology/nodes"
+        if not os.path.exists(topology_root):
+            return False
+        try:
+            node_ids = sorted(
+                int(n) for n in os.listdir(topology_root) if n.isdigit()
+            )
+        except Exception:
+            return False
+        for node_id in node_ids:
+            props_file = os.path.join(topology_root, str(node_id), "properties")
+            try:
+                props = {}
+                with open(props_file) as fh:
+                    for line in fh:
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            props[parts[0]] = parts[1]
+                if props.get("simd_count", "0") != "0":
+                    return True
+            except Exception:
+                pass
+        return False
 
     @staticmethod
     def _amd_linux_diagnostics() -> List[str]:
