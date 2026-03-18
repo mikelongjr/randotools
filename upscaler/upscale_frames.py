@@ -95,21 +95,42 @@ def run_diagnostics():
     if os.path.exists(dri_path):
         print(f"DRI Devices: {os.listdir(dri_path)}")
 
-    # Detect hardware GFX version to help with overrides
-    try:
-        with open("/sys/class/kfd/kfd/topology/nodes/1/properties", "r") as f:
-            for line in f:
-                if "gfx_target_version" in line:
-                    ver = line.strip().split()[-1]
-                    print(f"Hardware GFX Version: {ver}")
-                    if ver == "100305":
-                        print("Note: GFX 1035 detected (often 680M iGPU).")
-    except:
-        print("Hardware GFX Version: Could not detect.")
+    # Detect hardware GFX version(s) for all AMD GPU nodes in the KFD topology.
+    # On laptops with an iGPU + discrete GPU (e.g. HP Omen) there are multiple
+    # nodes; the CPU-only node (simd_count == 0) is skipped automatically.
+    topology_root = "/sys/class/kfd/kfd/topology/nodes"
+    if os.path.exists(topology_root):
+        try:
+            node_ids = sorted(
+                int(n) for n in os.listdir(topology_root) if n.isdigit()
+            )
+        except Exception:
+            node_ids = []
+        gpu_index = 0  # HIP_VISIBLE_DEVICES uses GPU-only ordinals (0, 1, ...)
+        for node_id in node_ids:
+            props_path = os.path.join(topology_root, str(node_id), "properties")
+            try:
+                props = {}
+                with open(props_path) as f:
+                    for line in f:
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            props[parts[0]] = parts[1]
+                if props.get("simd_count", "0") == "0":
+                    continue
+                ver = props.get("gfx_target_version", "unknown")
+                print(f"Hardware GFX Version (node {node_id}, HIP device {gpu_index}): {ver}")
+                if ver.isdigit() and len(ver) >= 6:
+                    v = int(ver)
+                    override = f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
+                    print(f"  Note: This GPU may need HSA_OVERRIDE_GFX_VERSION={override}")
+                    print(f"        HSA_OVERRIDE_GFX_VERSION={override} HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py")
+                gpu_index += 1
+            except Exception:
+                pass
+    else:
+        print("Hardware GFX Version: Could not detect (KFD topology not found).")
     
-    print("\nIf GFX 10.3.0 failed, try these one-by-one:")
-    print("1. HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=0 python upscale_frames.py")
-    print("2. HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=1 python upscale_frames.py")
     print("="*40 + "\n")
 run_diagnostics()
 def loader_thread(image_paths, q_in, num_workers, output_dir):
@@ -203,10 +224,11 @@ def main():
         print("\nWARNING: No GPU detected by PyTorch.")
         print("If you are on Linux with an AMD GPU, ensure you have ROCm installed and ")
         print("the ROCm version of PyTorch (check: pip list | grep torch).")
-        print("\nPRO TIP: If your AMD GPU is present but not 'found', try running this script with:")
-        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 python upscale_frames.py")
-        print("or")
-        print("    HSA_OVERRIDE_GFX_VERSION=11.0.0 python upscale_frames.py")
+        print("\nPRO TIP: If your AMD GPU is present but not 'found', run the diagnostics")
+        print("above to find each GPU's GFX version, then try one of:")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.5 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # iGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=2 python upscale_frames.py  # dGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=11.0.3 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # Radeon 780M")
     print("---------------------------------------------------------------------------\n")
 
     # Determine which model will be used and build the output directory name

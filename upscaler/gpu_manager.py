@@ -233,9 +233,16 @@ class GPUManager:
         name = torch.cuda.get_device_name(dev_idx)
         props = torch.cuda.get_device_properties(dev_idx)
 
-        # Detect vendor from name string
+        # Detect vendor from name string.
+        # iGPUs in AMD laptops (e.g. Radeon 680M, 780M) often report generic
+        # names like "Radeon Graphics" or include the codename/model number,
+        # so we extend the keyword list beyond discrete-GPU-only terms.
         vendor = GPUVendor.NVIDIA
-        if any(k in name.lower() for k in ("radeon", "vega", "navi", "amd", "rx", "gfx")):
+        if any(k in name.lower() for k in (
+            "radeon", "vega", "navi", "amd", "rx", "gfx",
+            "780m", "680m", "760m",     # common Omen/Ryzen iGPU model strings
+            "raphael", "phoenix", "rembrandt",  # AMD CPU/APU codenames
+        )):
             vendor = GPUVendor.AMD
 
         # Compute capability
@@ -350,11 +357,105 @@ class GPUManager:
         except Exception as exc:
             lines.append(f"Could not check Linux groups: {exc}")
 
-        for dev, label in [("/dev/kfd", "Kernel Fusion Driver"), ("/dev/dri", "DRI Render")]:
-            if os.path.exists(dev):
-                if not os.access(dev, os.R_OK | os.W_OK):
-                    lines.append(f"PERMISSION ERROR: Cannot access {dev} ({label}).")
-            else:
-                lines.append(f"NOT FOUND: {dev} ({label}) — ROCm may not be installed.")
+        # Check /dev/kfd
+        if os.path.exists("/dev/kfd"):
+            if not os.access("/dev/kfd", os.R_OK | os.W_OK):
+                lines.append("PERMISSION ERROR: Cannot access /dev/kfd (Kernel Fusion Driver).")
+        else:
+            lines.append("NOT FOUND: /dev/kfd (Kernel Fusion Driver) — ROCm may not be installed.")
+
+        # Enumerate individual DRI render nodes so laptops with both an iGPU
+        # and a discrete GPU (e.g. HP Omen) show each device explicitly.
+        dri_path = "/dev/dri"
+        if os.path.exists(dri_path):
+            try:
+                render_nodes = sorted(
+                    e for e in os.listdir(dri_path) if e.startswith("renderD")
+                )
+                if render_nodes:
+                    lines.append(f"DRI render nodes: {', '.join(render_nodes)}")
+                    for rn in render_nodes:
+                        full = os.path.join(dri_path, rn)
+                        if not os.access(full, os.R_OK | os.W_OK):
+                            lines.append(f"  PERMISSION ERROR: Cannot access {full}.")
+                else:
+                    lines.append("WARNING: No DRI render nodes found under /dev/dri.")
+            except Exception as exc:
+                lines.append(f"Could not enumerate DRI render nodes: {exc}")
+        else:
+            lines.append("NOT FOUND: /dev/dri (DRI Render) — ROCm may not be installed.")
+
+        # Scan all KFD topology nodes and report GFX version for each GPU node.
+        # On laptops with an iGPU + discrete GPU there will be multiple nodes;
+        # the node at index 0 is usually the CPU and should be skipped.
+        topology_root = "/sys/class/kfd/kfd/topology/nodes"
+        if os.path.exists(topology_root):
+            lines.append("KFD topology GPU nodes:")
+            found_any = False
+            try:
+                node_ids = sorted(
+                    int(n) for n in os.listdir(topology_root) if n.isdigit()
+                )
+            except Exception:
+                node_ids = []
+            gpu_index = 0  # HIP_VISIBLE_DEVICES uses GPU-only ordinals (0, 1, ...)
+            for node_id in node_ids:
+                props_file = os.path.join(topology_root, str(node_id), "properties")
+                try:
+                    props = {}
+                    with open(props_file) as fh:
+                        for line in fh:
+                            parts = line.strip().split(None, 1)
+                            if len(parts) == 2:
+                                props[parts[0]] = parts[1]
+                    # Skip CPU-only nodes (simd_count == 0)
+                    if props.get("simd_count", "0") == "0":
+                        continue
+                    found_any = True
+                    gfx_raw = props.get("gfx_target_version", "unknown")
+                    # Convert raw integer like "100305" → "10.3.5" for readability
+                    gfx_readable = gfx_raw
+                    if gfx_raw.isdigit() and len(gfx_raw) >= 6:
+                        v = int(gfx_raw)
+                        major, minor, patch = v // 10000, (v // 100) % 100, v % 100
+                        gfx_readable = f"{major}.{minor}.{patch}"
+                        override = f"{major}.{minor}.{patch}"
+                    else:
+                        override = gfx_raw
+                    vendor_id = props.get("vendor_id", "")
+                    lines.append(
+                        f"  Node {node_id} (HIP device {gpu_index}): "
+                        f"gfx_target_version={gfx_raw} ({gfx_readable})"
+                        + (f", vendor_id={vendor_id}" if vendor_id else "")
+                    )
+                    lines.append(
+                        f"    Override hint: HSA_OVERRIDE_GFX_VERSION={override} "
+                        f"HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py"
+                    )
+                    gpu_index += 1
+                except Exception:
+                    pass
+            if not found_any:
+                lines.append("  No GPU nodes found in KFD topology.")
+        else:
+            lines.append("KFD topology not found — ROCm may not be installed.")
+
+        # Show the current values of relevant ROCm/HIP environment variables so
+        # the user can see at a glance whether overrides are already in effect.
+        rocm_env_vars = (
+            "HSA_OVERRIDE_GFX_VERSION",
+            "HIP_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+            "GPU_DEVICE_ORDINAL",
+            "CUDA_VISIBLE_DEVICES",
+        )
+        env_lines = []
+        for var in rocm_env_vars:
+            val = os.environ.get(var)
+            if val is not None:
+                env_lines.append(f"  {var}={val}")
+        if env_lines:
+            lines.append("Active ROCm/HIP environment overrides:")
+            lines.extend(env_lines)
 
         return lines
