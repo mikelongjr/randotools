@@ -157,11 +157,24 @@ def run_diagnostics():
                     continue
                 ver = props.get("gfx_target_version", "unknown")
                 print(f"Hardware GFX Version (node {node_id}, HIP device {gpu_index}): {ver}")
-                if ver.isdigit() and len(ver) >= 6:
+                if ver.isdigit() and len(ver) >= 5:
                     v = int(ver)
-                    override = f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
-                    print(f"  Note: This GPU may need HSA_OVERRIDE_GFX_VERSION={override}")
-                    print(f"        HSA_OVERRIDE_GFX_VERSION={override} HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py")
+                    gfx_readable = f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
+                    # Use the wheel-aware mapping so the suggested override actually
+                    # works.  The raw GFX version may not be compiled into the
+                    # PyTorch ROCm wheel (e.g. gfx1032 "10.3.2" is missing —
+                    # the correct override for all RDNA2 variants is "10.3.0").
+                    try:
+                        from upscaler.gpu_manager import GPUManager as _GM  # type: ignore  # optional dep
+                        override = _GM._rocm_gfx_override(ver)
+                    except Exception:
+                        override = gfx_readable
+                    if override != gfx_readable:
+                        print(
+                            f"  Note: {gfx_readable} not in PyTorch ROCm wheel; "
+                            f"nearest supported base is {override}"
+                        )
+                    print(f"  HSA_OVERRIDE_GFX_VERSION={override} HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py")
                 gpu_index += 1
             except Exception:
                 pass

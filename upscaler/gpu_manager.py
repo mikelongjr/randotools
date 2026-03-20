@@ -28,6 +28,38 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# ROCm GFX version mapping
+# ---------------------------------------------------------------------------
+# PyTorch ROCm wheels include compiled code objects only for specific GFX
+# "base" targets.  Variants within the same architecture family that are NOT
+# in this set need HSA_OVERRIDE_GFX_VERSION to point at the supported base.
+#
+# Sources: pytorch.org/whl/rocm6.x wheel metadata + ROCm compatibility docs.
+_ROCM_WHEEL_GFX_TARGETS = frozenset({
+    "9.0.0",   # gfx900  — Vega 10 (RX Vega 56/64)
+    "9.0.2",   # gfx902  — Vega 10 Lite
+    "9.0.6",   # gfx906  — Vega 20 / Radeon VII, Instinct MI50/60
+    "9.0.8",   # gfx908  — Arcturus / Instinct MI100
+    "9.0.a",   # gfx90a  — Aldebaran / Instinct MI200
+    "9.4.0",   # gfx940  — Instinct MI300 family
+    "9.4.1",   # gfx941
+    "9.4.2",   # gfx942
+    "10.1.0",  # gfx1010 — RDNA1 base
+    "10.3.0",  # gfx1030 — RDNA2 base (Navi 21 / RX 6800 XT)
+    "11.0.0",  # gfx1100 — RDNA3 base (Navi 31 / RX 7900 XT)
+    "11.0.1",  # gfx1101 — Navi 32 (RX 7700 XT) — present in some wheels
+    "11.0.2",  # gfx1102 — Navi 33 (RX 7600)    — present in some wheels
+})
+
+# Maps GFX family "major.minor" → the recommended override version when the
+# exact GPU variant is not in _ROCM_WHEEL_GFX_TARGETS.
+_ROCM_FAMILY_OVERRIDE = {
+    "10.1": "10.1.0",  # RDNA1 variants
+    "10.3": "10.3.0",  # RDNA2 variants (gfx1031/1032/1033/1034/1035 → gfx1030)
+    "11.0": "11.0.0",  # RDNA3 variants not individually packaged
+}
+
 
 class GPUVendor(Enum):
     """GPU hardware vendor identifiers."""
@@ -415,6 +447,109 @@ class GPUManager:
         return False
 
     @staticmethod
+    def _rocm_gfx_override(gfx_raw: str) -> str:
+        """Return the correct HSA_OVERRIDE_GFX_VERSION for a KFD gfx_target_version.
+
+        ``gfx_raw`` is the raw decimal string from the KFD topology (e.g.
+        ``"100302"`` for gfx1032).
+
+        PyTorch ROCm wheels only include compiled code objects for a small set of
+        base GFX targets (see ``_ROCM_WHEEL_GFX_TARGETS``).  GPU variants not in
+        that set cause "HIP kernel error: invalid device function" at runtime.
+        Setting ``HSA_OVERRIDE_GFX_VERSION`` to the nearest base version makes
+        the ROCm runtime load the correct pre-compiled kernels.
+
+        Examples::
+
+            _rocm_gfx_override("100302")  # gfx1032 (RX 6650M) → "10.3.0"
+            _rocm_gfx_override("100305")  # gfx1035 (Radeon 680M) → "10.3.0"
+            _rocm_gfx_override("110000")  # gfx1100 → "11.0.0" (already supported)
+        """
+        if not gfx_raw.isdigit() or len(gfx_raw) < 5:
+            return gfx_raw
+        v = int(gfx_raw)
+        major = v // 10000
+        minor = (v // 100) % 100
+        patch = v % 100
+        version_str = f"{major}.{minor}.{patch}"
+        if version_str in _ROCM_WHEEL_GFX_TARGETS:
+            return version_str  # natively supported — no override needed
+        family = f"{major}.{minor}"
+        if family in _ROCM_FAMILY_OVERRIDE:
+            return _ROCM_FAMILY_OVERRIDE[family]
+        # Unknown family — return the raw decoded version (best-effort)
+        return version_str
+
+    @staticmethod
+    def apply_rocm_gfx_override() -> Optional[str]:
+        """Auto-set ``HSA_OVERRIDE_GFX_VERSION`` if the AMD GPU requires it.
+
+        Reads the KFD topology sysfs to find the hardware GFX version(s) and,
+        if ``HSA_OVERRIDE_GFX_VERSION`` is not already set in the environment,
+        sets it to the nearest PyTorch ROCm wheel-supported target.
+
+        **Must be called before the first HIP kernel is executed** (i.e. before
+        any ``torch.cuda.*`` or model inference call) because the ROCm HSA
+        runtime reads the variable during device initialisation.
+
+        Returns the override value that was applied, or ``None`` if no change
+        was made (either already set, not on Linux, or not needed).
+        """
+        if sys.platform != "linux":
+            return None
+        if os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+            return None  # already set by user or a previous call
+
+        topology_root = "/sys/class/kfd/kfd/topology/nodes"
+        if not os.path.exists(topology_root):
+            return None
+
+        overrides: set[str] = set()
+        try:
+            node_ids = sorted(int(n) for n in os.listdir(topology_root) if n.isdigit())
+        except Exception:
+            return None
+
+        for node_id in node_ids:
+            props_file = os.path.join(topology_root, str(node_id), "properties")
+            try:
+                props: dict[str, str] = {}
+                with open(props_file) as fh:
+                    for line in fh:
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            props[parts[0]] = parts[1]
+                if props.get("simd_count", "0") == "0":
+                    continue  # CPU-only node
+                gfx_raw = props.get("gfx_target_version", "")
+                if gfx_raw:
+                    overrides.add(GPUManager._rocm_gfx_override(gfx_raw))
+            except Exception:
+                pass
+
+        if not overrides:
+            return None
+
+        if len(overrides) == 1:
+            override_ver = next(iter(overrides))
+            os.environ["HSA_OVERRIDE_GFX_VERSION"] = override_ver
+            logger.info(
+                "Auto-set HSA_OVERRIDE_GFX_VERSION=%s for AMD GPU compatibility.",
+                override_ver,
+            )
+            return override_ver
+
+        # Multiple GPUs need different overrides — cannot set a single global.
+        # Log so the user knows; they can use HIP_VISIBLE_DEVICES to isolate.
+        logger.warning(
+            "AMD GPUs require different GFX overrides (%s). "
+            "Cannot auto-set HSA_OVERRIDE_GFX_VERSION. "
+            "Use HIP_VISIBLE_DEVICES to target one GPU at a time.",
+            ", ".join(sorted(overrides)),
+        )
+        return None
+
+    @staticmethod
     def _amd_linux_diagnostics() -> List[str]:
         """Return AMD-specific diagnostic lines for Linux."""
         import getpass
@@ -489,21 +624,28 @@ class GPUManager:
                         continue
                     found_any = True
                     gfx_raw = props.get("gfx_target_version", "unknown")
-                    # Convert raw integer like "100305" → "10.3.5" for readability
+                    # Convert raw integer like "100302" → human-readable "10.3.2"
                     gfx_readable = gfx_raw
-                    if gfx_raw.isdigit() and len(gfx_raw) >= 6:
+                    if gfx_raw.isdigit() and len(gfx_raw) >= 5:
                         v = int(gfx_raw)
                         major, minor, patch = v // 10000, (v // 100) % 100, v % 100
                         gfx_readable = f"{major}.{minor}.{patch}"
-                        override = f"{major}.{minor}.{patch}"
-                    else:
-                        override = gfx_raw
+                    # Use the wheel-aware mapping to determine the correct override.
+                    # Directly using the raw GFX version is WRONG for GPU variants
+                    # not compiled into the PyTorch ROCm wheel (e.g. gfx1032 →
+                    # "10.3.2" would fail; the correct override is "10.3.0").
+                    override = GPUManager._rocm_gfx_override(gfx_raw)
                     vendor_id = props.get("vendor_id", "")
                     lines.append(
                         f"  Node {node_id} (HIP device {gpu_index}): "
                         f"gfx_target_version={gfx_raw} ({gfx_readable})"
                         + (f", vendor_id={vendor_id}" if vendor_id else "")
                     )
+                    if override != gfx_readable:
+                        lines.append(
+                            f"    Note: {gfx_readable} is not in PyTorch ROCm wheel; "
+                            f"using nearest supported base {override}"
+                        )
                     lines.append(
                         f"    Override hint: HSA_OVERRIDE_GFX_VERSION={override} "
                         f"HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py"
