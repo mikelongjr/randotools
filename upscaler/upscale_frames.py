@@ -66,7 +66,44 @@ def run_diagnostics():
     print("AMD GPU DIAGNOSTICS")
     print("="*40)
     print(f"PyTorch version: {torch.__version__}")
-    print(f"ROCm/HIP version: {getattr(torch.version, 'hip', 'N/A')}")
+    hip_ver = getattr(torch.version, 'hip', None)
+    cuda_ver = getattr(torch.version, 'cuda', None)
+    print(f"ROCm/HIP version: {hip_ver or 'N/A'}")
+
+    # Detect the most common AMD GPU setup failure: the CUDA build of PyTorch
+    # is installed on a machine with AMD GPU hardware.  The environment variable
+    # overrides (HSA_OVERRIDE_GFX_VERSION, HIP_VISIBLE_DEVICES) have NO effect
+    # with a CUDA-build torch — a ROCm-build torch must be installed first.
+    if cuda_ver and not hip_ver:
+        from upscaler.gpu_manager import GPUManager  # type: ignore  # optional dep
+        if GPUManager._amd_hardware_present():
+            import sys as _sys
+            py_ver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
+            rocm_wheel_unsupported = _sys.version_info >= (3, 13)
+            print("")
+            print("!" * 40)
+            print("CRITICAL: Wrong PyTorch build!")
+            print(f"  Installed : torch {torch.__version__}  (CUDA build — for NVIDIA)")
+            print("  Required  : ROCm build  (e.g. +rocm6.2)")
+            print("")
+            print("  AMD GPUs CANNOT be used with a CUDA-build PyTorch.")
+            print("  No environment variable can fix this.")
+            print("")
+            if rocm_wheel_unsupported:
+                print(f"  NOTE: Python {py_ver} is active, but PyTorch ROCm wheels")
+                print("  are only available for Python 3.9–3.12. The setup script")
+                print("  will automatically install Python 3.12 and retry.")
+                print("")
+            print("  Fix — re-run the setup script (recommended):")
+            print("    ./fedora_setup.sh --amd")
+            print("    (tries rocm6.2 → rocm6.1 → rocm6.0 automatically)")
+            print("")
+            print("  Or manually reinstall PyTorch with ROCm support")
+            print("  (requires Python 3.12 or earlier in your venv):")
+            print("    pip install torch torchvision \\")
+            print("      --index-url https://download.pytorch.org/whl/rocm6.2")
+            print("!" * 40)
+            print("")
     
     # Check Group Permissions
     user = getpass.getuser()
@@ -95,21 +132,55 @@ def run_diagnostics():
     if os.path.exists(dri_path):
         print(f"DRI Devices: {os.listdir(dri_path)}")
 
-    # Detect hardware GFX version to help with overrides
-    try:
-        with open("/sys/class/kfd/kfd/topology/nodes/1/properties", "r") as f:
-            for line in f:
-                if "gfx_target_version" in line:
-                    ver = line.strip().split()[-1]
-                    print(f"Hardware GFX Version: {ver}")
-                    if ver == "100305":
-                        print("Note: GFX 1035 detected (often 680M iGPU).")
-    except:
-        print("Hardware GFX Version: Could not detect.")
+    # Detect hardware GFX version(s) for all AMD GPU nodes in the KFD topology.
+    # On laptops with an iGPU + discrete GPU (e.g. HP Omen) there are multiple
+    # nodes; the CPU-only node (simd_count == 0) is skipped automatically.
+    topology_root = "/sys/class/kfd/kfd/topology/nodes"
+    if os.path.exists(topology_root):
+        try:
+            node_ids = sorted(
+                int(n) for n in os.listdir(topology_root) if n.isdigit()
+            )
+        except Exception:
+            node_ids = []
+        gpu_index = 0  # HIP_VISIBLE_DEVICES uses GPU-only ordinals (0, 1, ...)
+        for node_id in node_ids:
+            props_path = os.path.join(topology_root, str(node_id), "properties")
+            try:
+                props = {}
+                with open(props_path) as f:
+                    for line in f:
+                        parts = line.strip().split(None, 1)
+                        if len(parts) == 2:
+                            props[parts[0]] = parts[1]
+                if props.get("simd_count", "0") == "0":
+                    continue
+                ver = props.get("gfx_target_version", "unknown")
+                print(f"Hardware GFX Version (node {node_id}, HIP device {gpu_index}): {ver}")
+                if ver.isdigit() and len(ver) >= 5:
+                    v = int(ver)
+                    gfx_readable = f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
+                    # Use the wheel-aware mapping so the suggested override actually
+                    # works.  The raw GFX version may not be compiled into the
+                    # PyTorch ROCm wheel (e.g. gfx1032 "10.3.2" is missing —
+                    # the correct override for all RDNA2 variants is "10.3.0").
+                    try:
+                        from upscaler.gpu_manager import GPUManager as _GM  # type: ignore  # optional dep
+                        override = _GM._rocm_gfx_override(ver)
+                    except Exception:
+                        override = gfx_readable
+                    if override != gfx_readable:
+                        print(
+                            f"  Note: {gfx_readable} not in PyTorch ROCm wheel; "
+                            f"nearest supported base is {override}"
+                        )
+                    print(f"  HSA_OVERRIDE_GFX_VERSION={override} HIP_VISIBLE_DEVICES={gpu_index} python upscale_frames.py")
+                gpu_index += 1
+            except Exception:
+                pass
+    else:
+        print("Hardware GFX Version: Could not detect (KFD topology not found).")
     
-    print("\nIf GFX 10.3.0 failed, try these one-by-one:")
-    print("1. HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=0 python upscale_frames.py")
-    print("2. HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=1 python upscale_frames.py")
     print("="*40 + "\n")
 run_diagnostics()
 def loader_thread(image_paths, q_in, num_workers, output_dir):
@@ -203,10 +274,11 @@ def main():
         print("\nWARNING: No GPU detected by PyTorch.")
         print("If you are on Linux with an AMD GPU, ensure you have ROCm installed and ")
         print("the ROCm version of PyTorch (check: pip list | grep torch).")
-        print("\nPRO TIP: If your AMD GPU is present but not 'found', try running this script with:")
-        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 python upscale_frames.py")
-        print("or")
-        print("    HSA_OVERRIDE_GFX_VERSION=11.0.0 python upscale_frames.py")
+        print("\nPRO TIP: If your AMD GPU is present but not 'found', run the diagnostics")
+        print("above to find each GPU's GFX version, then try one of:")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.5 HIP_VISIBLE_DEVICES=0 python upscale_frames.py  # iGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=10.3.0 HIP_VISIBLE_DEVICES=1 python upscale_frames.py  # dGPU example")
+        print("    HSA_OVERRIDE_GFX_VERSION=11.0.3 HIP_VISIBLE_DEVICES=0 python upscale_frames.py  # Radeon 780M")
     print("---------------------------------------------------------------------------\n")
 
     # Determine which model will be used and build the output directory name
