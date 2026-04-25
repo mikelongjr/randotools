@@ -67,6 +67,11 @@ class Config:
     log_level: str = "INFO"
     check_updates: bool = True
 
+    # Video
+    output_container: str = "mp4"  # "mp4" or "mkv"
+    save_frames: bool = False
+    reencode_audio: bool = False
+
     # Queue persistence — file paths saved on close so the last uncompleted
     # batch is automatically restored on the next startup.
     last_queue_files: List[str] = field(default_factory=list)
