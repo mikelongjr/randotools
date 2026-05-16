@@ -1,7 +1,7 @@
 # randotools
 
 A collection of tools and scripts. The main component is the **RealESRGAN Upscaler** — a
-production-ready PyQt6-based image upscaling application with NVIDIA and AMD GPU support.
+PyQt6-based image and video upscaling application with NVIDIA and AMD GPU support.
 
 ## Quick Start
 

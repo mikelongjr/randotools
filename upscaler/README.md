@@ -1,378 +1,88 @@
-# RealESRGAN Upscaler GUI
+# RealESRGAN Upscaler
 
-A modern, feature-rich PyQt6-based image upscaler for Fedora Linux using Real-ESRGAN models.
+PyQt6 desktop app for image and video upscaling with Real-ESRGAN models. The app is optimized for Fedora and supports NVIDIA CUDA, AMD ROCm, and CPU-only installs.
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
-![OS](https://img.shields.io/badge/OS-Fedora%2043-red)
+Python 3.10 or newer is required. For AMD ROCm wheels, Python 3.10-3.12 is recommended.
 
-## Features
+## Current Architecture
 
-✨ **Core Features**
-- 🖼️ Batch image upscaling with 2x and 4x scale factors
-- ⚡ Multi-GPU support with automatic load balancing
-- ⏸️ Pause/resume functionality for long-running jobs
-- 🎨 Multiple model selection (Standard quality, Anime optimized)
-- 📊 Real-time GPU monitoring and system diagnostics
-- 🔧 Half-precision (FP16) support for faster processing
-- 💾 Configuration persistence
-
-🐧 **Fedora-Specific**
-- 🎯 Optimized for Fedora 43 and later
-- 📦 RPM package support
-- 🔧 One-click setup helpers for:
-  - ROCm driver installation
-  - GPU permission fixes
-  - Dependency installation
-- 🏥 System diagnostics for AMD GPU troubleshooting
-
-🎮 **GUI Features**
-- 💻 Intuitive tabbed interface with 4 main sections:
-  - **Upscaler**: Main processing interface
-  - **Settings**: Configuration and setup helpers
-  - **System Monitor**: Real-time GPU and system stats
-  - **Diagnostics**: System information and troubleshooting
+- `upscaler/gui/main_window.py` provides the PyQt6 interface.
+- `upscaler/core/` contains the GUI-independent job, workspace, ffmpeg, and video pipeline code.
+- Video jobs use per-job cache workspaces under `~/.cache/realesrgan-upscaler/jobs/`.
+- Downloaded model weights are stored under `~/.local/share/realesrgan-upscaler/weights/` by default.
+- Packaged `upscaler/weights/` files are treated as read-only fallback weights.
 
 ## Quick Start
 
-### Installation
+From the repository root:
 
 ```bash
-# Install system dependencies
-sudo dnf install -y python3-pip python3-devel gcc-c++ git
-
-# Clone and install
-git clone https://github.com/mikelongjr/randotools.git
-cd randotools/upscaler
-pip install --user -e .
-
-# For AMD GPU support (recommended)
-sudo dnf install rocm-hip rocm-opencl
-pip install --user torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7
-sudo usermod -aG render,video $USER
-# Then reboot or: newgrp render video
+chmod +x fedora_setup.sh
+./fedora_setup.sh
+source ~/.venv/realesrgan/bin/activate
+realesrgan-upscaler
 ```
 
-### Launch
+The setup script installs system packages, chooses the appropriate PyTorch build for your GPU mode, installs app dependencies, and creates a desktop launcher.
+
+## Manual Development Install
 
 ```bash
-realesrgan-upscaler-gui
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel setuptools
+pip install torch torchvision
+pip install -e "upscaler[cpu]"
+realesrgan-upscaler
 ```
 
-## Detailed Documentation
-
-- 📖 [Installation Guide](INSTALL.md) - Complete setup instructions
-- 🚀 [Getting Started](docs/GETTING_STARTED.md) - Usage tutorial
-- 🔧 [Configuration Guide](docs/CONFIGURATION.md) - Advanced settings
-- 🐛 [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and fixes
-
-## Screenshots
-
-*GUI Interface (Coming soon)*
-
-## System Requirements
-
-### Minimum
-- **OS**: Fedora 43+
-- **Python**: 3.8+
-- **RAM**: 4GB
-- **Storage**: 2GB for models
-
-### Recommended
-- **GPU**: NVIDIA, AMD (ROCm), or Apple Silicon
-- **RAM**: 8GB+
-- **Storage**: SSD for faster processing
-
-## Installation Methods
-
-### Method 1: User Install (Recommended)
-```bash
-git clone https://github.com/mikelongjr/randotools.git
-cd randotools/upscaler
-pip install --user -e .
-```
-
-### Method 2: System-wide via RPM
-```bash
-sudo dnf install rpmbuild fedora-packager
-cd randotools/upscaler
-rpmbuild -ba realesrgan-upscaler.spec
-sudo dnf install ~/rpmbuild/RPMS/noarch/realesrgan-upscaler-gui-2.0.0-1.fc43.noarch.rpm
-```
-
-### Method 3: Development Mode
-```bash
-git clone https://github.com/mikelongjr/randotools.git
-cd randotools/upscaler
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
-python3 -m gui.upscaler_app
-```
-
-## Usage
-
-### Basic Workflow
-1. Launch the application: `realesrgan-upscaler-gui`
-2. Select input directory (images to upscale)
-3. Select output directory (where upscaled images will be saved)
-4. Choose model type and scale factor
-5. Click "Start Processing"
-
-### Advanced Options
-- **Pause/Resume**: Stop processing temporarily and continue later
-- **GPU Selection**: Choose specific GPU device
-- **Worker Threads**: Optimize for your hardware
-- **Half-Precision**: Trade accuracy for speed
-- **Resume on Startup**: Automatically continue interrupted jobs
-
-### Settings
-Access via the "Settings" tab to:
-- Configure GPU device and worker count
-- Install ROCm drivers
-- Fix GPU permissions
-- Install missing dependencies
-- Configure application preferences
-
-### Monitoring
-Monitor system performance in "System Monitor" tab:
-- GPU status and name
-- Memory usage
-- Real-time utilization (during processing)
-
-### Diagnostics
-Troubleshoot issues in "Diagnostics" tab:
-- System information
-- PyTorch and GPU details
-- Group permission status
-- Device node availability
-
-## Models
-
-### Standard (RealESRGAN_x4plus)
-- **Quality**: Highest quality upscaling
-- **Speed**: Slower
-- **Use Case**: Photography, realistic images
-- **Scale Factors**: 2x, 3x, 4x
-
-### Anime (RealESRGAN_x4plus_anime_6B)
-- **Quality**: Optimized for anime art
-- **Speed**: Faster (6B parameters vs 68M)
-- **Use Case**: Anime, manga, anime-style art
-- **Scale Factors**: 4x
-- **Requirements**: BasicSR library
-
-## GPU Support
-
-### NVIDIA GPUs
-```bash
-# CUDA support is included in standard PyTorch
-pip install --user torch torchvision torchaudio
-```
-
-### AMD GPUs (Recommended on Fedora)
-```bash
-# Install ROCm
-sudo dnf install rocm-hip rocm-opencl
-
-# Install PyTorch with ROCm
-pip install --user torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7
-
-# Fix permissions
-sudo usermod -aG render,video $USER
-```
-
-### CPU-only
-```bash
-# No special installation needed
-pip install --user torch torchvision torchaudio
-```
-
-## Configuration
-
-Configuration is saved to: `~/.config/realesrgan-upscaler/config.json`
-
-Example:
-```json
-{
-  "input_dir": "/path/to/input",
-  "output_dir": "/path/to/output",
-  "model_type": "standard",
-  "scale_factor": 4,
-  "num_workers": 1,
-  "use_half_precision": true,
-  "resume_on_startup": true,
-  "gpu_device": 0
-}
-```
-
-## Performance Tips
-
-1. **Use Half-Precision**: Provides ~2x speedup (enabled by default)
-2. **Batch Processing**: Process multiple images for better GPU utilization
-3. **SSD Storage**: Use SSD for input/output directories
-4. **Multi-GPU**: Increase workers if you have multiple GPUs
-5. **Model Selection**: Use Anime model only for anime images
-
-## Troubleshooting
-
-### GPU Not Detected
-```bash
-# Fix permissions
-sudo usermod -aG render,video $USER
-
-# For AMD GPUs with specific GFX versions
-HSA_OVERRIDE_GFX_VERSION=10.3.0 realesrgan-upscaler-gui
-```
-
-### PyTorch Import Error
-```bash
-# Reinstall PyTorch for your GPU
-pip install --force-reinstall --user torch torchvision
-```
-
-### BasicSR Install Error
-BasicSR is only distributed as a source tarball (no pre-built wheel).
-Two separate issues can prevent a clean install:
-
-1. **Build isolation**: pip's default PEP 517 isolation creates a fresh
-   virtual-env and tries to download PyTorch inside it, which usually hangs
-   or fails.  Use `--no-build-isolation` so setup.py reuses the already-
-   installed torch/numpy.
-
-2. **Python 3.13 exec/locals bug (PEP 667)**: BasicSR's `get_version()` calls
-   `exec()` inside a function and then reads back `locals()['__version__']`.
-   Python 3.13 changed `locals()` to return a snapshot (PEP 667), so `exec()`
-   no longer updates the enclosing scope — raising `KeyError: '__version__'`.
+For CUDA or ROCm, install the matching PyTorch wheel before `pip install -e upscaler`:
 
 ```bash
-# Install build dependencies first
-sudo dnf install gcc-c++ python3-devel
+# NVIDIA CUDA example
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# Step 1 – clone the source (gives a real git repo so version.py exists)
-git clone --depth 1 https://github.com/XPixelGroup/BasicSR.git /tmp/BasicSR
-
-# Step 2 – patch setup.py to fix the Python 3 exec/locals bug
-python3 - /tmp/BasicSR/setup.py <<'EOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    src = f.read()
-patched = src.replace(
-    "exec(compile(f.read(), version_file, 'exec'))",
-    "_ns = {}; exec(compile(f.read(), version_file, 'exec'), _ns)"
-).replace(
-    "return locals()['__version__']",
-    "return _ns['__version__']"
-)
-with open(path, 'w') as f:
-    f.write(patched)
-EOF
-
-# Step 3 – install from the patched local checkout
-CUDA_VISIBLE_DEVICES='' pip install /tmp/BasicSR --no-build-isolation
+# AMD ROCm example
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
-> **Note:** `SETUPTOOLS_SCM_PRETEND_VERSION` has no effect for basicsr —
-> it uses its own git-hash helper, not setuptools_scm.
+## Video Upscaling Notes
 
-For more troubleshooting, see [INSTALL.md](INSTALL.md#troubleshooting)
+Video support requires `ffmpeg` and `ffprobe`.
 
-## Architecture
+The rebuilt video path currently processes one video job at a time. Image batches remain supported separately. This keeps cancellation, per-job cache state, resume behavior, and progress reporting accurate.
 
-### Project Structure
-```
-upscaler/
-├── gui/
-│   ├── __init__.py
-│   └── upscaler_app.py          # Main PyQt6 application
-├── upscale_frames.py             # CLI upscaler (legacy)
-├── temperature_watcher.py        # GPU temperature monitoring
-├── setup.py                      # Package setup
-├── realesrgan-upscaler.spec     # RPM spec file
-├── requirements.txt              # Python dependencies
-├── INSTALL.md                    # Installation guide
-└── README.md                     # This file
+Video output options include:
+
+- Container: `mp4` or `mkv`
+- Audio: copy original audio or re-encode to AAC
+- Optional preservation of upscaled intermediate frames
+
+## Model Weights
+
+Use **Tools > Download Models** in the GUI. Downloads are written to:
+
+```text
+~/.local/share/realesrgan-upscaler/weights/
 ```
 
-### Dependencies
-- **PyQt6**: Modern GUI framework
-- **PyTorch**: Deep learning framework
-- **RealESRGAN**: Upscaling model implementation
-- **Pillow**: Image processing
-- **BasicSR**: Advanced architecture definitions
-- **OpenCV**: Additional image utilities
+You can override this location in the config file with `weights_dir`.
 
-## Development
+## RPM Packaging
 
-### Setup Development Environment
+The RPM path is intentionally a thin launcher/app-file package. It does not run networked `pip install` during package installation because PyTorch wheels vary by GPU and should be installed through `fedora_setup.sh` or a managed virtual environment.
+
+Build from the repository root:
+
 ```bash
-git clone https://github.com/mikelongjr/randotools.git
-cd randotools/upscaler
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[dev]"
+chmod +x build_rpm.sh
+./build_rpm.sh
 ```
 
-### Running Tests
+## Tests
+
 ```bash
-python3 -m pytest tests/
+python -m pytest tests
 ```
 
-### Building Documentation
-```bash
-cd docs/
-make html
-```
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-## License
-
-MIT License - See [LICENSE](LICENSE) file for details
-
-## Acknowledgments
-
-- [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) for the upscaling models
-- [BasicSR](https://github.com/xinntao/BasicSR) for architecture implementations
-- [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) for the GUI framework
-
-## Support
-
-### Getting Help
-1. Check the [Diagnostics tab](INSTALL.md#diagnostics-tab) in the app
-2. Review the [Installation Guide](INSTALL.md)
-3. Check [Troubleshooting section](INSTALL.md#troubleshooting)
-4. Open an [issue on GitHub](https://github.com/mikelongjr/randotools/issues)
-
-### Reporting Bugs
-Please include:
-- Fedora version
-- GPU model
-- Error messages from the Processing Log
-- Output from the Diagnostics tab
-
-## Changelog
-
-### Version 2.0.0 (2026-03-16)
-- ✨ Complete GUI rewrite with PyQt6
-- ✨ Real-time GPU monitoring
-- ✨ Pause/resume functionality
-- ✨ System diagnostics panel
-- ✨ Fedora-specific setup helpers
-- ✨ Configuration persistence
-- ✨ RPM package support
-
-### Version 1.0.0 (Original)
-- CLI-based upscaler
-- Multi-GPU support
-- ROCm compatibility
+The core pipeline tests mock ffmpeg and do not require a GPU or real media files.

@@ -50,7 +50,7 @@ install_system_deps() {
         python3 python3-pip python3-devel python3-virtualenv \
         python3-qt6 python3-qt6-devel \
         gcc gcc-c++ make \
-        git wget curl \
+        git wget curl ffmpeg ffmpeg-libs \
         libGL libGLU mesa-libGL \
         libXext libXrender libXtst libXi \
         xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
@@ -201,9 +201,6 @@ install_python_deps() {
     # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
 
-    info "Installing base Python dependencies…"
-    pip install -r "${REPO_DIR}/requirements.txt" --no-deps 2>/dev/null || true
-
     info "Installing PyTorch for $detected_gpu…"
     case "$detected_gpu" in
         nvidia)
@@ -249,7 +246,7 @@ install_python_deps() {
             ;;
     esac
 
-    # Install remaining requirements
+    # Install remaining requirements after the GPU-specific PyTorch wheel is in place.
     pip install PyQt6 Pillow opencv-python tqdm
     # huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires; pin before installing it
     pip install "huggingface_hub<0.16.0"

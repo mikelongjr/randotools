@@ -2,22 +2,14 @@ import logging
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from upscaler.core.ffmpeg_runner import FfmpegRunner, require_media_tools
+from upscaler.core.media import VideoMetadata, parse_rate
+
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class VideoMetadata:
-    """Metadata extracted from a video file."""
-
-    fps: float
-    width: int
-    height: int
-    duration: float
 
 
 class VideoProcessor:
@@ -29,49 +21,36 @@ class VideoProcessor:
     def __init__(self, ffmpeg_path: str = "ffmpeg", ffprobe_path: str = "ffprobe"):
         self.ffmpeg = ffmpeg_path
         self.ffprobe = ffprobe_path
+        self.runner = FfmpegRunner(ffmpeg_path=ffmpeg_path, ffprobe_path=ffprobe_path)
 
     def get_metadata(self, video_path: str) -> VideoMetadata:
         """Extracts FPS, resolution, and duration using ffprobe."""
-        cmd = [
-            self.ffprobe,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,r_frame_rate,duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            video_path,
-        ]
         try:
-            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().splitlines()
-            if len(output) < 4:
-                raise ValueError(f"Unexpected ffprobe output for {video_path}: {output}")
+            data = self.runner.probe_json(video_path)
+            streams = data.get("streams", [])
+            stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+            if not stream:
+                raise ValueError(f"No video stream found in {video_path}")
 
-            width = int(output[0])
-            height = int(output[1])
-
-            # Handle r_frame_rate as "30000/1001"
-            fps_str = output[2]
-            if "/" in fps_str:
-                num, den = map(int, fps_str.split("/"))
-                fps = num / den
-            else:
-                fps = float(fps_str)
-
-            duration = float(output[3])
-
-            return VideoMetadata(fps=fps, width=width, height=height, duration=duration)
+            fps = parse_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate", "0/0"))
+            duration = float(stream.get("duration") or data.get("format", {}).get("duration") or 0.0)
+            return VideoMetadata(
+                fps=fps,
+                width=int(stream["width"]),
+                height=int(stream["height"]),
+                duration=duration,
+            )
         except Exception as e:
             logger.error(f"Failed to get metadata for {video_path}: {e}")
             raise
 
-    def extract_frames(self, input_files: List[str], output_dir: str) -> int:
+    def extract_frames(self, input_files: List[str], output_dir: str, fps: Optional[float] = None) -> int:
         """
         Extracts frames from a list of video files into output_dir.
         Frames are named sequentially across all input files to facilitate concatenation.
         """
+        require_media_tools(self.ffmpeg, self.ffprobe)
+        shutil.rmtree(output_dir, ignore_errors=True)
         os.makedirs(output_dir, exist_ok=True)
         total_frames = 0
 
@@ -99,15 +78,24 @@ class VideoProcessor:
             start_num = total_frames + 1
             cmd = [
                 self.ffmpeg,
+                "-hide_banner",
                 "-i",
                 video_path,
+            ]
+            if fps:
+                # Use -r for output framerate to ensure consistent frame count
+                cmd.extend(["-r", str(fps)])
+            else:
+                cmd.extend(["-vsync", "0"])
+            
+            cmd.extend([
                 "-start_number",
                 str(start_num),
                 "-q:v",
                 "2",  # High quality for PNG (though PNG is lossless, this is for other formats)
-                os.path.join(output_dir, "frame_%06d.png"),
                 "-y",  # Overwrite
-            ]
+                os.path.join(output_dir, "frame_%06d.png"),
+            ])
             
             try:
                 # We don't want to capture all output as it can be huge, 
