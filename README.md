@@ -3,6 +3,9 @@
 A collection of tools and scripts. The main component is the **RealESRGAN Upscaler** — a
 production-ready PyQt6-based image upscaling application with NVIDIA and AMD GPU support.
 
+Also included: **[NACA Inlet](naca_inlet/README.md)** — import a STEP surface and cut a
+parametric NACA submerged inlet at a given location, sized by throat area.
+
 ## Quick Start
 
 ```bash
