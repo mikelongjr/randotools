@@ -2,6 +2,7 @@
 Configuration management for the RealESRGAN Upscaler.
 
 Settings are persisted to ``~/.config/realesrgan-upscaler/config.json``.
+Downloaded model weights are stored under the user's data directory by default.
 
 Usage::
 
@@ -19,6 +20,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import ClassVar, List, Optional
+
+from upscaler.core.paths import default_weights_dir
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,11 @@ class Config:
     # Misc
     log_level: str = "INFO"
     check_updates: bool = True
+
+    # Video
+    output_container: str = "mp4"  # "mp4" or "mkv"
+    save_frames: bool = False
+    reencode_audio: bool = False
 
     # Queue persistence — file paths saved on close so the last uncompleted
     # batch is automatically restored on the next startup.
@@ -199,9 +207,25 @@ class Config:
         info = self.MODELS.get(key, {})
         filename = info.get("filename", f"{key}.pth")
 
-        if self.weights_dir and os.path.isdir(self.weights_dir):
-            return os.path.join(self.weights_dir, filename)
+        search_dirs = []
+        if self.weights_dir:
+            search_dirs.append(Path(self.weights_dir).expanduser())
+        user_weights = default_weights_dir()
+        search_dirs.append(user_weights)
 
-        # Search relative to this file (upscaler/ package) → upscaler/weights/
         pkg_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(pkg_dir, "weights", filename)
+        search_dirs.append(Path(pkg_dir) / "weights")
+
+        for directory in search_dirs:
+            candidate = directory / filename
+            if candidate.is_file():
+                return str(candidate)
+
+        # Missing models should be downloaded to a user-writable location.
+        return str((Path(self.weights_dir).expanduser() if self.weights_dir else user_weights) / filename)
+
+    def writable_weights_dir(self) -> str:
+        """Return the directory where downloaded weights should be written."""
+        if self.weights_dir:
+            return str(Path(self.weights_dir).expanduser())
+        return str(default_weights_dir())

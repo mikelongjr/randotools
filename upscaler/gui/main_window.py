@@ -15,8 +15,10 @@ Features:
 from __future__ import annotations
 
 import collections
+import hashlib
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -75,9 +77,42 @@ from PyQt6.QtWidgets import (
 )
 
 from upscaler.config import Config
+from upscaler.core.ffmpeg_runner import FfmpegRunner, ProcessCancelled, require_media_tools
+from upscaler.core.jobs import AudioMode, JobKind, OutputSettings, UpscaleJob
+from upscaler.core.model_manager import infer_scale
+from upscaler.core.video_pipeline import VideoPipeline
 from upscaler.gpu_manager import GPUInfo, GPUManager, GPUVendor
 
 logger = logging.getLogger(__name__)
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".avseq", ".mpg", ".mpeg"}
+
+
+def _path_digest(path: str) -> str:
+    return hashlib.sha1(str(Path(path).expanduser().resolve()).encode("utf-8")).hexdigest()[:8]
+
+
+def _output_name_for_source(path: str, duplicate_names: set[str], container: str = "mp4") -> str:
+    src = Path(path)
+    suffix = src.suffix.lower()
+    if suffix in VIDEO_EXTENSIONS:
+        stem = f"{src.stem}_upscaled"
+        ext = f".{container}"
+    else:
+        stem = src.stem
+        ext = src.suffix
+    if src.name in duplicate_names:
+        stem = f"{stem}_{_path_digest(path)}"
+    return f"{stem}{ext}"
+
+
+def _duplicate_basenames(paths: List[str]) -> set[str]:
+    counts: dict[str, int] = {}
+    for p in paths:
+        name = Path(p).name
+        counts[name] = counts.get(name, 0) + 1
+    return {name for name, count in counts.items() if count > 1}
 
 # ---------------------------------------------------------------------------
 # Worker thread
@@ -110,6 +145,9 @@ class UpscaleWorker(QThread):
         device_string: str,
         weights_path: str,
         use_half: bool = True,
+        output_container: str = "mp4",
+        save_frames: bool = False,
+        reencode_audio: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -119,7 +157,11 @@ class UpscaleWorker(QThread):
         self.device_string = device_string
         self.weights_path = weights_path
         self.use_half = use_half
+        self.output_container = output_container
+        self.save_frames = save_frames
+        self.reencode_audio = reencode_audio
         self._cancel = False
+        self._video_pipeline: Optional[VideoPipeline] = None
 
     def cancel(self) -> None:
         self._cancel = True
@@ -128,9 +170,29 @@ class UpscaleWorker(QThread):
         import queue as _queue
         import threading as _threading
 
-        import torch  # type: ignore
         from PIL import Image  # type: ignore
         from upscaler.upscale_engine import UpscaleEngine
+
+        original_input_files = list(self.input_files)
+        video_files = [f for f in original_input_files if Path(f).suffix.lower() in VIDEO_EXTENSIONS]
+        image_files = [f for f in original_input_files if Path(f).suffix.lower() not in VIDEO_EXTENSIONS]
+        is_video_mode = bool(video_files)
+
+        if video_files and image_files:
+            self.log_message.emit("❌ Mixed image/video queues are not supported yet. Process videos separately.")
+            self.finished.emit(0, len(original_input_files), 0.0)
+            return
+        if len(video_files) > 1:
+            self.log_message.emit("❌ Process one video at a time so each job has its own workspace and progress.")
+            self.finished.emit(0, len(video_files), 0.0)
+            return
+        if is_video_mode:
+            try:
+                require_media_tools()
+            except Exception as exc:
+                self.log_message.emit(f"❌ Video tools unavailable: {exc}")
+                self.finished.emit(0, 1, 0.0)
+                return
 
         self.log_message.emit(f"Loading model '{self.model_name}' on {self.device_string}…")
 
@@ -149,7 +211,85 @@ class UpscaleWorker(QThread):
             return
 
         self.log_message.emit(f"✔ Model loaded. Processing {len(self.input_files)} file(s)…")
-        os.makedirs(self.output_dir, exist_ok=True)
+
+        if is_video_mode:
+            t_start = time.perf_counter()
+            source = video_files[0]
+            duplicate_names = _duplicate_basenames(original_input_files)
+            output_name = _output_name_for_source(source, duplicate_names, self.output_container)
+            audio_mode = AudioMode.AAC if self.reencode_audio else AudioMode.COPY
+            job = UpscaleJob(
+                source_path=source,
+                output_dir=self.output_dir,
+                kind=JobKind.VIDEO,
+                model_name=self.model_name,
+                settings=OutputSettings(
+                    container=self.output_container,
+                    audio_mode=audio_mode,
+                    keep_frames=self.save_frames,
+                ),
+                output_path=str(Path(self.output_dir) / output_name),
+            )
+            runner = FfmpegRunner()
+            pipeline = VideoPipeline(runner=runner)
+            self._video_pipeline = pipeline
+            self.job_started.emit(source)
+
+            def _process_frame(src: Path, dst: Path, idx: int, total: int) -> None:
+                if self._cancel:
+                    pipeline.cancel()
+                    raise ProcessCancelled("operation cancelled")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    return
+                img = Image.open(src).convert("RGB")
+                sr_image = engine.infer_image(img)
+                sr_image.save(dst)
+
+            def _on_pipeline_event(event) -> None:
+                if event.message:
+                    self.log_message.emit(event.message)
+                if event.total:
+                    current = event.current_file or Path(source).name
+                    self.progress.emit(
+                        event.completed,
+                        event.total,
+                        current,
+                        event.eta_s,
+                        event.avg_s_per_frame,
+                    )
+
+            try:
+                output = pipeline.process(
+                    job=job,
+                    processor=_process_frame,
+                    scale=infer_scale(self.model_name),
+                    progress=_on_pipeline_event,
+                    resume=True,
+                )
+                self.job_done.emit(source, True, "")
+                self.log_message.emit(f"✅ Video upscaling complete: {output}")
+                self.finished.emit(1, 0, time.perf_counter() - t_start)
+            except ProcessCancelled:
+                self.job_done.emit(source, False, "cancelled")
+                self.finished.emit(0, 1, time.perf_counter() - t_start)
+            except Exception as e:
+                self.job_done.emit(source, False, str(e))
+                self.log_message.emit(f"❌ Video processing failed: {e}")
+                self.finished.emit(0, 1, time.perf_counter() - t_start)
+            finally:
+                self._video_pipeline = None
+                engine.unload_model()
+            return
+        else:
+            self._is_video_processing = False
+            os.makedirs(self.output_dir, exist_ok=True)
+
+        duplicate_names = _duplicate_basenames(self.input_files)
+        output_names = {
+            src: _output_name_for_source(src, duplicate_names, self.output_container)
+            for src in self.input_files
+        }
 
         # ------------------------------------------------------------------
         # 3-stage pipeline: loader pool → GPU loop → saver
@@ -225,22 +365,25 @@ class UpscaleWorker(QThread):
                 entry = save_q.get()
                 if entry is None:
                     break
-                sr_image, dst, filename, idx, total, success, infer_error, t_start_item = entry
+                sr_image, dst, filename, idx, total, success, infer_error, t_start_item, skipped = entry
                 final_success = success
                 final_error = infer_error
-                if success:
+                if success and not skipped:
                     try:
                         sr_image.save(dst)
                     except Exception as exc:
                         final_success = False
                         final_error = str(exc)
                         self.log_message.emit(f"❌ Save failed [{filename}]: {exc}")
+                
                 # Measure end-to-end time (GPU inference + save) for accurate ETA.
-                elapsed_item = time.perf_counter() - t_start_item
-                _recent_times.append(elapsed_item)
+                # Only include non-skipped frames in the moving average to keep ETA realistic.
+                if not skipped:
+                    elapsed_item = time.perf_counter() - t_start_item
+                    _recent_times.append(elapsed_item)
                 # Use the moving average of the last ≤10 frames for both ETA and
                 # the per-frame speed indicator shown in the progress panel.
-                avg_spf = sum(_recent_times) / len(_recent_times)
+                avg_spf = sum(_recent_times) / len(_recent_times) if _recent_times else 0.0
                 remaining = total - idx - 1
                 eta = avg_spf * remaining
                 # job_done and progress are emitted from this background thread;
@@ -267,25 +410,33 @@ class UpscaleWorker(QThread):
                 break  # loader finished normally
 
             src, img, load_error = item
-            filename = os.path.basename(src)
+            filename = output_names.get(src, os.path.basename(src))
             dst = os.path.join(self.output_dir, filename)
             t_item = time.perf_counter()
 
-            self.job_started.emit(filename)
+            self.job_started.emit(src)
 
             if load_error:
                 success = False
                 error = load_error
                 sr_image = None
+                skipped = False
+            elif os.path.exists(dst):
+                success = True
+                error = ""
+                sr_image = None
+                skipped = True
             else:
                 try:
                     sr_image = engine.infer_image(img)
                     success = True
                     error = ""
+                    skipped = False
                 except Exception as exc:
                     success = False
                     error = str(exc)
                     sr_image = None
+                    skipped = False
 
             if success:
                 succeeded += 1
@@ -294,7 +445,7 @@ class UpscaleWorker(QThread):
 
             # Hand off to saver; pass t_item so it can measure end-to-end time
             save_q.put((sr_image, dst, filename, idx, len(self.input_files),
-                        success, error, t_item))
+                        success, error, t_item, skipped))
             idx += 1
 
             if self._cancel:
@@ -326,6 +477,7 @@ class QueueItem(QListWidgetItem):
         super().__init__()
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
+        self.output_filename = self.filename
         self._status = self.STATUS_PENDING
         self._update_text()
 
@@ -595,12 +747,7 @@ class ModelDownloaderDialog(QDialog):
 
     def _weights_dir(self) -> str:
         """Return the directory where weight files are (or should be) stored."""
-        if self._config.weights_dir and os.path.isdir(self._config.weights_dir):
-            return self._config.weights_dir
-        # Derive from config module location: upscaler/weights/
-        import upscaler.config as _cfg_mod
-        pkg_dir = os.path.dirname(os.path.abspath(_cfg_mod.__file__))
-        return os.path.join(pkg_dir, "weights")
+        return self._config.writable_weights_dir()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -611,7 +758,7 @@ class ModelDownloaderDialog(QDialog):
 
         info = QLabel(
             "Download Real-ESRGAN model weights from the official GitHub releases.<br>"
-            "Files are saved to the <b>weights</b> directory inside the package."
+            "Files are saved to your user data directory so system installs do not require root."
         )
         info.setWordWrap(True)
         info.setTextFormat(Qt.TextFormat.RichText)
@@ -905,60 +1052,46 @@ class MainWindow(QMainWindow):
         opt_grid = QGridLayout(opt_group)
         opt_grid.setColumnStretch(1, 1)
 
+        # Scale
+        opt_grid.addWidget(QLabel("Scale:"), 0, 0)
+        self._scale_combo = QComboBox()
+        opt_grid.addWidget(self._scale_combo, 0, 1)
+
         # Model
-        opt_grid.addWidget(QLabel("Model:"), 0, 0)
+        opt_grid.addWidget(QLabel("Model:"), 1, 0)
         self._model_combo = QComboBox()
-        _basicsr_ok = self._basicsr_available()
-        for key, meta in Config.MODELS.items():
-            needs_basicsr = meta.get("requires_basicsr", False)
-            if needs_basicsr and not _basicsr_ok:
-                label = f"{key}  —  {meta['description']}  ⚠ (requires BasicSR)"
-            else:
-                label = f"{key}  —  {meta['description']}"
-            self._model_combo.addItem(label, userData=key)
-            if needs_basicsr and not _basicsr_ok:
-                # Grey out and disable the item so it cannot be selected
-                idx = self._model_combo.count() - 1
-                item_flags = self._model_combo.model().item(idx).flags()
-                self._model_combo.model().item(idx).setFlags(
-                    item_flags & ~Qt.ItemFlag.ItemIsEnabled
-                )
-                self._model_combo.model().item(idx).setToolTip(
-                    "This model requires the 'basicsr' package.\n"
-                    "Install it with (skip build isolation so the\n"
-                    "already-installed torch is reused):\n"
-                    "  CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation"
-                )
+        self._scale_combo.addItems(["2", "4"])
+        self._update_model_list(self._scale_combo.currentText())
+        self._scale_combo.currentTextChanged.connect(self._update_model_list)
         # Select saved model (skip disabled entries if basicsr is absent)
         saved_idx = self._model_combo.findData(self._config.model_name)
         if saved_idx >= 0:
             item = self._model_combo.model().item(saved_idx)
             if item and (item.flags() & Qt.ItemFlag.ItemIsEnabled):
                 self._model_combo.setCurrentIndex(saved_idx)
-            # else: leave the first enabled item selected (Qt default)
-        opt_grid.addWidget(self._model_combo, 0, 1)
+        opt_grid.addWidget(self._model_combo, 1, 1)
 
         # GPU
-        opt_grid.addWidget(QLabel("GPU:"), 1, 0)
+        opt_grid.addWidget(QLabel("GPU:"), 2, 0)
         self._gpu_combo = QComboBox()
-        opt_grid.addWidget(self._gpu_combo, 1, 1)
+        opt_grid.addWidget(self._gpu_combo, 2, 1)
         self._btn_diag = QPushButton("Diagnostics…")
         self._btn_diag.setFixedWidth(120)
         self._btn_diag.clicked.connect(self._show_diagnostics)
-        opt_grid.addWidget(self._btn_diag, 1, 2)
+        opt_grid.addWidget(self._btn_diag, 2, 2)
 
         # Output directory
-        opt_grid.addWidget(QLabel("Output Dir:"), 2, 0)
+        opt_grid.addWidget(QLabel("Output Dir:"), 3, 0)
         self._output_edit = QLabel(self._config.output_dir or "(not set)")
         self._output_edit.setStyleSheet(
             "background: palette(base); color: palette(text); "
             "padding:3px; border-radius:3px;"
         )
-        opt_grid.addWidget(self._output_edit, 2, 1)
+        opt_grid.addWidget(self._output_edit, 3, 1)
         self._btn_output = QPushButton("Browse…")
         self._btn_output.setFixedWidth(120)
         self._btn_output.clicked.connect(self._choose_output_dir)
-        opt_grid.addWidget(self._btn_output, 2, 2)
+        opt_grid.addWidget(self._btn_output, 3, 2)
 
         # Half-precision
         self._half_cb = QCheckBox("Use FP16 half-precision")
@@ -968,7 +1101,26 @@ class MainWindow(QMainWindow):
             "Automatically disabled for older GPUs (e.g. GTX 10-series / Pascal)."
         )
         self._half_cb.setChecked(self._config.use_half_precision)
-        opt_grid.addWidget(self._half_cb, 3, 0, 1, 3)
+        opt_grid.addWidget(self._half_cb, 4, 0, 1, 2)
+
+        # Save frames
+        self._save_frames_cb = QCheckBox("Save upscaled frames")
+        self._save_frames_cb.setToolTip("Preserve the temporary upscaled PNG frames in the output directory.")
+        self._save_frames_cb.setChecked(self._config.save_frames)
+        opt_grid.addWidget(self._save_frames_cb, 5, 0, 1, 2)
+
+        # Re-encode audio
+        self._reencode_audio_cb = QCheckBox("Re-encode audio to AAC")
+        self._reencode_audio_cb.setToolTip("Convert audio stream to AAC. Useful for better compatibility with some players.")
+        self._reencode_audio_cb.setChecked(self._config.reencode_audio)
+        opt_grid.addWidget(self._reencode_audio_cb, 5, 2)
+
+        # Output Container
+        self._container_combo = QComboBox()
+        self._container_combo.addItems(["mp4", "mkv"])
+        self._container_combo.setCurrentText(self._config.output_container)
+        opt_grid.addWidget(QLabel("Container:"), 4, 2)
+        opt_grid.addWidget(self._container_combo, 4, 3)
 
         center_layout.addWidget(opt_group)
 
@@ -1172,9 +1324,9 @@ class MainWindow(QMainWindow):
         start_dir = self._config.input_dir or str(Path.home())
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select Images",
+            "Select Files",
             start_dir,
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff);;All Files (*)",
+            "Images/Videos (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif *.mp4 *.mkv *.avi *.mov *.mpg *.mpeg *.avseq);;All Files (*)",
         )
         if paths:
             self._enqueue_files(paths)
@@ -1190,7 +1342,7 @@ class MainWindow(QMainWindow):
 
     def _enqueue_files(self, paths: List[str]) -> None:
         existing = {
-            item.filepath
+            str(Path(item.filepath).expanduser().resolve())
             for i in range(self._queue_list.count())
             if isinstance(item := self._queue_list.item(i), QueueItem)
         }
@@ -1198,9 +1350,11 @@ class MainWindow(QMainWindow):
         self._queue_list.setUpdatesEnabled(False)
         try:
             for p in paths:
-                if p not in existing:
-                    item = QueueItem(p)
+                resolved = str(Path(p).expanduser().resolve())
+                if resolved not in existing:
+                    item = QueueItem(resolved)
                     self._queue_list.addItem(item)
+                    existing.add(resolved)
                     added += 1
         finally:
             self._queue_list.setUpdatesEnabled(True)
@@ -1238,10 +1392,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _scan_directory(directory: str) -> List[str]:
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff"}
         results = []
         for fname in sorted(os.listdir(directory)):
-            if Path(fname).suffix.lower() in exts:
+            if Path(fname).suffix.lower() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
                 results.append(os.path.join(directory, fname))
         return results
 
@@ -1271,6 +1424,34 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Output Directory", "Please select an output directory.")
             return
 
+        queued_files = [
+            self._queue_list.item(i).filepath  # type: ignore[union-attr]
+            for i in range(self._queue_list.count())
+            if isinstance(self._queue_list.item(i), QueueItem)
+        ]
+        video_files = [p for p in queued_files if Path(p).suffix.lower() in VIDEO_EXTENSIONS]
+        image_files = [p for p in queued_files if Path(p).suffix.lower() not in VIDEO_EXTENSIONS]
+        if video_files and image_files:
+            QMessageBox.warning(
+                self,
+                "Mixed Queue",
+                "Please process videos separately from images. The rebuilt video pipeline tracks one video job at a time.",
+            )
+            return
+        if len(video_files) > 1:
+            QMessageBox.warning(
+                self,
+                "One Video at a Time",
+                "Please queue one video at a time so cancellation, resume, and progress stay accurate.",
+            )
+            return
+        if video_files:
+            try:
+                require_media_tools()
+            except Exception as exc:
+                QMessageBox.critical(self, "Video Tools Missing", str(exc))
+                return
+
         model_key = self._model_combo.currentData()
         weights_path = self._config.resolve_weights_path(model_key)
         if not os.path.isfile(weights_path):
@@ -1294,6 +1475,9 @@ class MainWindow(QMainWindow):
         self._config.model_name = model_key
         self._config.preferred_gpu_index = self._gpu_combo.currentIndex()
         self._config.use_half_precision = self._half_cb.isChecked()
+        self._config.save_frames = self._save_frames_cb.isChecked()
+        self._config.reencode_audio = self._reencode_audio_cb.isChecked()
+        self._config.output_container = self._container_combo.currentText()
         self._config.save()
 
         # Remember the actual (suffixed) output directory so preview and other
@@ -1320,13 +1504,21 @@ class MainWindow(QMainWindow):
         # Build O(1) lookup dict, mark already-done items, collect remaining
         self._queue_item_map: dict[str, "QueueItem"] = {}
         files_to_process: list[str] = []
+        duplicate_names = _duplicate_basenames(queued_files)
         self._queue_list.setUpdatesEnabled(False)
         try:
             for i in range(self._queue_list.count()):
                 item = self._queue_list.item(i)
                 if isinstance(item, QueueItem):
+                    item.output_filename = _output_name_for_source(
+                        item.filepath,
+                        duplicate_names,
+                        self._container_combo.currentText(),
+                    )
                     self._queue_item_map[item.filename] = item
-                    if item.filename in existing_outputs:
+                    self._queue_item_map[item.filepath] = item
+                    self._queue_item_map[item.output_filename] = item
+                    if item.output_filename in existing_outputs:
                         item.set_status(QueueItem.STATUS_DONE)
                     else:
                         item.set_status(QueueItem.STATUS_PENDING)
@@ -1368,6 +1560,9 @@ class MainWindow(QMainWindow):
             device_string=device,
             weights_path=weights_path,
             use_half=self._half_cb.isChecked(),
+            output_container=self._container_combo.currentText(),
+            save_frames=self._save_frames_cb.isChecked(),
+            reencode_audio=self._reencode_audio_cb.isChecked(),
         )
         self._worker.job_started.connect(self._on_job_started)
         self._worker.progress.connect(self._on_progress)
@@ -1379,6 +1574,9 @@ class MainWindow(QMainWindow):
     def _cancel_processing(self) -> None:
         if self._worker:
             self._worker.cancel()
+            pipeline = getattr(self._worker, "_video_pipeline", None)
+            if pipeline is not None:
+                pipeline.cancel()
             self._log_message("Cancelling…")
             self._btn_cancel.setEnabled(False)
 
@@ -1426,11 +1624,11 @@ class MainWindow(QMainWindow):
                 now = time.monotonic()
                 if now - self._last_preview_time >= self._PREVIEW_REFRESH_INTERVAL:
                     self._last_preview_time = now
-                    out_path = os.path.join(self._active_output_dir, filename)
+                    out_path = os.path.join(self._active_output_dir, item.output_filename)
                     self._preview_out.show_image(out_path)
 
         if not success:
-            self._log_message(f"❌ {filename}: {error}")
+            self._log_message(f"❌ {os.path.basename(filename)}: {error}")
 
     def _on_batch_finished(self, succeeded: int, failed: int, elapsed_s: float) -> None:
         self._btn_start.setEnabled(True)
@@ -1545,6 +1743,55 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
+    # Model filtering
+    # ------------------------------------------------------------------
+
+    def _update_model_list(self, scale_text: str) -> None:
+        """Filter and populate the model combo box based on the selected scale."""
+        try:
+            target_scale = int(scale_text)
+        except (ValueError, TypeError):
+            return
+
+        self._model_combo.clear()
+        _basicsr_ok = self._basicsr_available()
+
+        # Filter models that match the selected scale
+        filtered_models = {
+            k: v for k, v in Config.MODELS.items() if v.get("scale") == target_scale
+        }
+
+        for key, meta in filtered_models.items():
+            needs_basicsr = meta.get("requires_basicsr", False)
+            if needs_basicsr and not _basicsr_ok:
+                label = f"{key}  —  {meta['description']}  ⚠ (requires BasicSR)"
+            else:
+                label = f"{key}  —  {meta['description']}"
+            
+            self._model_combo.addItem(label, userData=key)
+            
+            if needs_basicsr and not _basicsr_ok:
+                idx = self._model_combo.count() - 1
+                item = self._model_combo.model().item(idx)
+                if item:
+                    item_flags = item.flags()
+                    item.setFlags(item_flags & ~Qt.ItemFlag.ItemIsEnabled)
+                    item.setToolTip(
+                        "This model requires the 'basicsr' package.\n"
+                        "Install it with (skip build isolation so the\n"
+                        "already-installed torch is reused):\n"
+                        "  CUDA_VISIBLE_DEVICES='' pip install basicsr --no-build-isolation"
+                    )
+
+        # Try to maintain the previously selected model if it's still available
+        saved_model = self._config.model_name
+        saved_idx = self._model_combo.findData(saved_model)
+        if saved_idx >= 0:
+            item = self._model_combo.model().item(saved_idx)
+            if item and (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+                self._model_combo.setCurrentIndex(saved_idx)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -1586,15 +1833,6 @@ class MainWindow(QMainWindow):
         self._config.last_queue_files = queue_paths
         self._config.save()
 
-        if self._thermal_timer:
-            self._thermal_timer.stop()
-
-        if self._power_mgr:
-            try:
-                self._power_mgr.stop()
-            except Exception:
-                pass
-
         if self._worker and self._worker.isRunning():
             reply = QMessageBox.question(
                 self,
@@ -1606,6 +1844,18 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._worker.cancel()
+            pipeline = getattr(self._worker, "_video_pipeline", None)
+            if pipeline is not None:
+                pipeline.cancel()
             self._worker.wait(5000)
+
+        if self._thermal_timer:
+            self._thermal_timer.stop()
+
+        if self._power_mgr:
+            try:
+                self._power_mgr.stop()
+            except Exception:
+                pass
 
         event.accept()

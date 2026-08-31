@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RealESRGAN Upscaler
+Comment=PyQt6-based AI image upscaler (NVIDIA/AMD GPU support)
+Exec=realesrgan-upscaler
+Icon=realesrgan-upscaler
+Terminal=false
+Categories=Graphics;RasterGraphics;
+Keywords=upscale;AI;image;GPU;

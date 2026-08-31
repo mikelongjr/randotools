@@ -50,7 +50,7 @@ install_system_deps() {
         python3 python3-pip python3-devel python3-virtualenv \
         python3-qt6 python3-qt6-devel \
         gcc gcc-c++ make \
-        git wget curl \
+        git wget curl ffmpeg ffmpeg-libs \
         libGL libGLU mesa-libGL \
         libXext libXrender libXtst libXi \
         xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
@@ -153,8 +153,40 @@ EOF
 # 3. Python virtual environment
 # =============================================================================
 setup_venv() {
-    info "Creating Python virtual environment at $VENV_DIR…"
-    python3 -m venv "$VENV_DIR"
+    # PyTorch ROCm wheels are only published for Python 3.9–3.12 (not 3.13+).
+    # On Fedora 43 the default `python3` is Python 3.13, so for AMD mode we
+    # must explicitly use Python 3.12 if it is available; otherwise the pip
+    # install will always fail with "no matching distribution found".
+    local py_bin="python3"
+    if [[ "${GPU_MODE}" == "amd" || "$(detect_gpu)" == "amd" ]]; then
+        for candidate in python3.12 python3.11 python3.10; do
+            if command -v "$candidate" &>/dev/null; then
+                py_bin="$candidate"
+                info "Using $py_bin for AMD ROCm compatibility (PyTorch ROCm wheels require Python ≤ 3.12)."
+                break
+            fi
+        done
+        if [[ "$py_bin" == "python3" ]]; then
+            local py_major py_minor
+            py_major="$("$py_bin" -c 'import sys; print(sys.version_info.major)')"
+            py_minor="$("$py_bin" -c 'import sys; print(sys.version_info.minor)')"
+            # Numeric comparison: incompatible if major > 3, or major == 3 and minor > 12
+            if (( py_major > 3 )) || (( py_major == 3 && py_minor > 12 )); then
+                warn "Python ${py_major}.${py_minor} detected but PyTorch ROCm wheels only support Python ≤ 3.12."
+                warn "Installing python3.12 via dnf…"
+                sudo dnf install -y python3.12 python3.12-devel || {
+                    error "Could not install python3.12. Please install it manually:"
+                    error "  sudo dnf install python3.12 python3.12-devel"
+                    error "Then re-run: $0 --amd"
+                    exit 1
+                }
+                py_bin="python3.12"
+            fi
+        fi
+    fi
+
+    info "Creating Python virtual environment at $VENV_DIR (using $py_bin)…"
+    "$py_bin" -m venv "$VENV_DIR"
     # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
     pip install --upgrade pip wheel setuptools
@@ -169,9 +201,6 @@ install_python_deps() {
     # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
 
-    info "Installing base Python dependencies…"
-    pip install -r "${REPO_DIR}/requirements.txt" --no-deps 2>/dev/null || true
-
     info "Installing PyTorch for $detected_gpu…"
     case "$detected_gpu" in
         nvidia)
@@ -180,16 +209,44 @@ install_python_deps() {
                 || pip install torch torchvision   # fall back to CPU wheel
             ;;
         amd)
-            pip install torch torchvision \
-                --index-url https://download.pytorch.org/whl/rocm6.0 \
-                || pip install torch torchvision
+            # Try ROCm versions from newest to oldest.
+            # IMPORTANT: do NOT fall back to plain `pip install torch` here —
+            # that installs the CUDA build which cannot use AMD GPUs at all.
+            _installed_rocm=false
+            for rocm_ver in rocm6.2 rocm6.1 rocm6.0 rocm5.7; do
+                info "Trying PyTorch with ${rocm_ver}…"
+                if pip install torch torchvision \
+                        --index-url "https://download.pytorch.org/whl/${rocm_ver}"; then
+                    success "PyTorch installed with ${rocm_ver}."
+                    _installed_rocm=true
+                    break
+                fi
+                warn "  ${rocm_ver}: no matching wheel — trying next version…"
+            done
+            if [[ "$_installed_rocm" == "false" ]]; then
+                error "Could not install a ROCm-enabled PyTorch wheel."
+                error ""
+                error "Most likely cause: no ROCm wheel exists for your Python version."
+                error "  PyTorch ROCm wheels are only available for Python 3.9–3.12."
+                local active_py
+                active_py="$(python --version 2>&1)"
+                error "  Active Python: $active_py"
+                error ""
+                error "Fix options:"
+                error "  1. Re-run this script — it will install python3.12 automatically."
+                error "  2. Create a Python 3.12 venv manually:"
+                error "       python3.12 -m venv $VENV_DIR"
+                error "       source $VENV_DIR/bin/activate"
+                error "       pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
+                exit 1
+            fi
             ;;
         *)
             pip install torch torchvision
             ;;
     esac
 
-    # Install remaining requirements
+    # Install remaining requirements after the GPU-specific PyTorch wheel is in place.
     pip install PyQt6 Pillow opencv-python tqdm
     # huggingface_hub 0.16+ removed cached_download which py_real_esrgan requires; pin before installing it
     pip install "huggingface_hub<0.16.0"
@@ -397,8 +454,9 @@ print_summary() {
 
     if [[ "$detected_gpu" == "amd" ]]; then
         echo -e "${YELLOW}AMD GPU note:${NC}"
-        echo "  If PyTorch cannot see your GPU, try:"
-        echo "    HSA_OVERRIDE_GFX_VERSION=10.3.0 realesrgan-upscaler"
+        echo "  If PyTorch cannot see your GPU, run the app once to see diagnostics,"
+        echo "  then try the per-GPU override command shown there, e.g.:"
+        echo "    HSA_OVERRIDE_GFX_VERSION=10.3.5 realesrgan-upscaler"
         echo ""
     fi
 
