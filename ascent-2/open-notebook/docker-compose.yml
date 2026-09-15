@@ -1,0 +1,69 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    command: ["start", "--log", "info", "--user", "${SURREAL_USER}", "--pass", "${SURREAL_PASSWORD}", "rocksdb:/mydata/mydatabase.db"]
+    user: root
+    # Do NOT publish host port 8000 — llama4-scout already owns it.
+    volumes:
+      - ./surreal_data:/mydata
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    restart: unless-stopped
+    pull_policy: always
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: speaches
+    volumes:
+      - ./speaches_data:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+    # CPU image — Scout owns the GPU. arm64-capable.
+
+  embeddings:
+    build: ./embeddings
+    image: local-embeddings:latest
+    container_name: local-embeddings
+    volumes:
+      - ./embeddings_data:/data
+    environment:
+      - MODEL_ID=BAAI/bge-small-en-v1.5
+      - SERVED_MODEL_NAME=bge-small-en-v1.5
+      - HF_HOME=/data/hf
+    restart: unless-stopped
+
+  open_notebook:
+    image: lfnovo/open_notebook:v1-latest
+    ports:
+      # Substituted by scripts/render-compose.sh → Tailscale IP only
+      - "${TAILSCALE_IP}:8502:8502"
+      - "${TAILSCALE_IP}:5055:5055"
+    environment:
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY}
+      - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD}
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=${SURREAL_USER}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD}
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+      - OPENAI_COMPATIBLE_BASE_URL=http://host.docker.internal:8000/v1
+      - OPENAI_COMPATIBLE_BASE_URL_LLM=http://host.docker.internal:8000/v1
+      - OPENAI_COMPATIBLE_API_KEY=sk-local
+      - OPENAI_COMPATIBLE_API_KEY_LLM=sk-local
+      - OPENAI_COMPATIBLE_BASE_URL_EMBEDDING=http://local-embeddings:8080/v1
+      - OPENAI_COMPATIBLE_API_KEY_EMBEDDING=sk-local
+      - CORS_ORIGINS=http://ascent-2:8502,http://${TAILSCALE_IP}:8502
+      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./notebook_data:/app/data
+    depends_on:
+      - surrealdb
+      - embeddings
+      - speaches
+    restart: unless-stopped
+    pull_policy: always
+    deploy:
+      resources:
+        limits:
+          memory: 3G
