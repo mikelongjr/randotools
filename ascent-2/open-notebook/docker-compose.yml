@@ -32,7 +32,8 @@ services:
     restart: unless-stopped
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    build: .
+    image: open-notebook-local:scout-vision
     ports:
       # Substituted by scripts/render-compose.sh → Tailscale IP only
       - "${TAILSCALE_IP}:8502:8502"
@@ -49,10 +50,20 @@ services:
       - OPENAI_COMPATIBLE_BASE_URL_LLM=http://host.docker.internal:8000/v1
       - OPENAI_COMPATIBLE_API_KEY=sk-local
       - OPENAI_COMPATIBLE_API_KEY_LLM=sk-local
-      - OPENAI_COMPATIBLE_BASE_URL_EMBEDDING=http://local-embeddings:8080/v1
+      # Blackbird Ollama embeds on AMD RX 7600M XT (ROCm) — Tailscale :11434
+      # Fallback CPU service remains as local-embeddings:8080 if blackbird is down.
+      - OPENAI_COMPATIBLE_BASE_URL_EMBEDDING=${EMBEDDING_BASE_URL:-http://100.127.118.13:11434/v1}
       - OPENAI_COMPATIBLE_API_KEY_EMBEDDING=sk-local
       - CORS_ORIGINS=http://ascent-2:8502,http://${TAILSCALE_IP}:8502
       - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+      # OCR for scanned PDFs / image-only docs (installs Docling on first boot)
+      - OPEN_NOTEBOOK_ENABLE_DOCLING=true
+      # Route Docling picture captions to Scout (patched content_core)
+      - DOCLING_VISION_API_URL=http://host.docker.internal:8000/v1/chat/completions
+      - DOCLING_VISION_MODEL=llama4-scout
+      - DOCLING_VISION_API_KEY=sk-local
+      - DOCLING_OCR_BACKEND=onnxruntime
+      - DOCLING_OCR_LANG=en
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -62,8 +73,7 @@ services:
       - embeddings
       - speaches
     restart: unless-stopped
-    pull_policy: always
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 8G

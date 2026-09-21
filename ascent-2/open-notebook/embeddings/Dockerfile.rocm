@@ -1,0 +1,19 @@
+FROM python:3.12-slim-bookworm
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends curl libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+# Install ROCm torch first; keep it pinned so sentence-transformers cannot pull CUDA wheels.
+RUN pip install --no-cache-dir \
+      torch==2.9.1+rocm6.4 \
+      --index-url https://download.pytorch.org/whl/rocm6.4 \
+ && pip install --no-cache-dir \
+      fastapi "uvicorn[standard]" sentence-transformers \
+      --extra-index-url https://download.pytorch.org/whl/rocm6.4 \
+      --upgrade-strategy only-if-needed \
+ && python -c "import torch; assert '+rocm' in torch.__version__, torch.__version__; print('torch', torch.__version__, 'hip', torch.version.hip)"
+COPY server.py /app/server.py
+ENV MODEL_ID=Qwen/Qwen3-Embedding-0.6B
+ENV SERVED_MODEL_NAME=qwen3-embedding:0.6b-4k
+ENV HF_HOME=/data/hf
+EXPOSE 8080
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]

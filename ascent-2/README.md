@@ -12,9 +12,10 @@ capabilities as of 2026-09-15.
 
 | Capability | How |
 |---|---|
-| **Llama 4 Scout** OpenAI-compatible chat (Cursor / tools) | vLLM container `llama4-scout` on `:8000` |
+| **Llama 4 Scout** OpenAI-compatible chat + vision (Cursor / tools) | vLLM `llama4-scout` on `:8000` (64k ctx, up to 2 images, 2 seqs) |
 | **Open Notebook** research UI | Compose stack on Tailscale `:8502` / API `:5055` |
-| **Embeddings** | Local CPU service `bge-small-en-v1.5` |
+| **PDF OCR + figure captions** | Docling OCR via **onnxruntime** RapidOCR (ARM-safe); figures → Scout (`DOCLING_VISION_*`) |
+| **Embeddings** | Blackbird Ollama **`qwen3-embedding:0.6b-4k`** on **AMD RX 7600M XT** (ROCm `:11434`); CPU `bge-small` fallback |
 | **TTS / STT** | Speaches (Kokoro + faster-whisper-small), CPU |
 | **Hardening** | Tailscale-only UI/API bind, CORS locked, no host publish for embed/STT |
 | **Backups** | Nightly local tarball on ascent-2 (`03:00`) |
@@ -29,15 +30,27 @@ capabilities as of 2026-09-15.
 ```
 Tailscale peers
     │
-    ├─ Cursor / clients ──► :8000  llama4-scout (vLLM, GPU)
+    ├─ Cursor / clients ──► :8000  llama4-scout (vLLM, GPU, text+images)
     │
     └─ Browser ──► :8502/:5055  open_notebook
                         │
-                        ├─ host.docker.internal:8000  (Scout chat)
-                        ├─ local-embeddings:8080      (bge-small)
-                        ├─ speaches:8000              (TTS/STT)
-                        └─ surrealdb:8000             (DB, internal only)
+                        ├─ host.docker.internal:8000   (Scout chat + PDF figure captions)
+                        ├─ blackbird:11434             (qwen3/nomic embeds on AMD ROCm)
+                        ├─ local-embeddings:8080       (bge-small fallback)
+                        ├─ speaches:8000               (TTS/STT)
+                        └─ surrealdb:8000              (DB, internal only)
 ```
+
+### Blackbird embeddings
+
+System Ollama on blackbird (`:11434`) uses the **AMD RX 7600M XT** via ROCm
+(`CUDA_VISIBLE_DEVICES=-1`, `OLLAMA_LLM_LIBRARY=rocm`, `HSA_OVERRIDE_GFX_VERSION=11.0.2`).
+`OLLAMA_KEEP_ALIVE=5m` so models unload instead of pinning forever.
+
+Open Notebook talks to `http://100.127.118.13:11434/v1` over Tailscale (port already open).
+Do **not** reboot blackbird to recover Ollama — use `sudo systemctl restart ollama` only.
+
+Switching embed models/dims requires **re-embedding** existing Open Notebook sources.
 
 ---
 
@@ -127,7 +140,10 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 **Served name:** `llama4-scout`  
 **Endpoint:** `http://ascent-2:8000/v1` (Tailscale) — Cursor API key can be any dummy (`sk-local`)  
 **Sampling defaults in vLLM:** temperature `0.6`, top_p `0.9`, min_p `0.01`  
-**Context:** `65536`, max concurrent seqs `8`, KV cache `fp8_e4m3`, GPU util `0.80`
+**Context:** `65536`, max concurrent seqs `2`, KV cache `fp8_e4m3`, GPU util `0.78`  
+**Multimodal:** `--limit-mm-per-prompt '{"image":2}'`, `--max-num-batched-tokens 8192` (vision tower is in the W4A16 checkpoint). Seq/image caps leave headroom for 64k on GB10 unified memory.
+
+Vision smoke: send OpenAI-style `image_url` (prefer base64 `data:`) in `/v1/chat/completions`.
 
 > Soft `reboot` on this GX10 can leave the machine powered off — power button may be required.
 
@@ -146,11 +162,25 @@ What that does:
 
 - Builds `local-embeddings` (`BAAI/bge-small-en-v1.5`)
 - Starts Speaches CPU; downloads Kokoro TTS + Whisper-small STT
-- Starts SurrealDB + Open Notebook
+- Builds `open-notebook-local:scout-vision` (upstream image + Docling→Scout patch + `onnxruntime`)
+- Starts SurrealDB + Open Notebook with Docling OCR enabled
+- Routes Docling figure captions to Scout (`DOCLING_VISION_API_URL` → `host.docker.internal:8000`)
+- Pins RapidOCR to `DOCLING_OCR_BACKEND=onnxruntime` / `DOCLING_OCR_LANG=en` (avoids CUDA-torch CPU segfaults on aarch64)
 - Binds UI/API to **Tailscale IP only**
 - Sets `CORS_ORIGINS` to `http://ascent-2:8502` and the Tailscale URL
 - Enables `open-notebook-backup-local.timer` (03:00)
 - Registers three OpenAI-compatible credentials + default models via API
+
+After configure, set document processing to Docling with OCR only (vision off — Scout vision per-page made multi-PDF ingest multi-hour/day on GB10):
+
+```bash
+PW=$(grep OPEN_NOTEBOOK_PASSWORD /opt/open-notebook/.env | cut -d= -f2)
+curl -sS -X PUT -H "Authorization: Bearer $PW" -H "Content-Type: application/json" \
+  "http://$(tailscale ip -4):5055/api/settings" \
+  -d '{"default_content_processing_engine_doc":"docling","docling_ocr":true,"docling_vision":false,"docling_formulas":false}'
+```
+
+**Ingest strategy:** Prefer omenboy Open Notebook (or Open WebUI knowledge) for PDF libraries. Keep ascent-2 Scout for chat/vision on demand; ascent-2 ON with `docling_vision=true` + `WORKER_MAX_TASKS=1` is too slow for bulk ingest.
 
 **Important:** Esperanto ignores per-modality `endpoint_*` when `base_url` is set — use **separate credentials** for Scout / embeddings / Speaches (the configure script does this).
 
@@ -208,8 +238,10 @@ ascent-2/
 │   ├── run_llama4_scout.sh            ← vLLM docker run
 │   └── patch_tokenizer.sh             ← add <|python_tag|>
 ├── open-notebook/
+│   ├── Dockerfile                     ← onnxruntime + Docling→Scout patch
 │   ├── docker-compose.yml
 │   ├── .env.example
+│   ├── patches/content_core_docling.py  ← Scout vision API + RapidOCR onnx
 │   ├── embeddings/{Dockerfile,server.py}
 │   └── backup/backup-open-notebook-local.sh
 └── scripts/

@@ -6,9 +6,11 @@ RECIPE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${OPEN_NOTEBOOK_ROOT:-/opt/open-notebook}"
 TS_IP="$(tailscale ip -4)"
 
-mkdir -p "$DEST" "$DEST/bin"
+mkdir -p "$DEST" "$DEST/bin" "$DEST/patches"
 cp -a "$RECIPE_ROOT/open-notebook/embeddings" "$DEST/"
 cp -a "$RECIPE_ROOT/open-notebook/backup" "$DEST/"
+cp -a "$RECIPE_ROOT/open-notebook/patches/." "$DEST/patches/"
+cp "$RECIPE_ROOT/open-notebook/Dockerfile" "$DEST/Dockerfile"
 cp "$RECIPE_ROOT/open-notebook/docker-compose.yml" "$DEST/docker-compose.yml"
 
 if [[ ! -f "$DEST/.env" ]]; then

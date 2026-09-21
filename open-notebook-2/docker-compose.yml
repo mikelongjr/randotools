@@ -1,0 +1,59 @@
+# Second Open Notebook on omenboy — isolated client dataset.
+# Shares local-embeddings + speaches from /opt/open-notebook (external network).
+# Own SurrealDB + notebook_data + password/encryption key.
+
+services:
+  surrealdb:
+    image: docker.io/surrealdb/surrealdb:v2
+    container_name: open-notebook-2-surrealdb
+    # Use --pass=VALUE so passwords starting with '-' are not parsed as CLI flags
+    command: ["start", "--log", "info", "--user", "${SURREAL_USER}", "--pass=${SURREAL_PASSWORD}", "rocksdb:/mydata/mydatabase.db"]
+    user: root
+    volumes:
+      - /space/open-notebook-2/surreal_data:/mydata:Z
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    restart: unless-stopped
+    networks:
+      - on2
+
+  open_notebook:
+    image: docker.io/lfnovo/open_notebook:v1-latest
+    container_name: open-notebook-2
+    ports:
+      - "${TAILSCALE_IP}:8503:8502"
+      - "${TAILSCALE_IP}:5056:5055"
+    environment:
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY}
+      - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD}
+      # Frontend on :8503 must call this instance's API on :5056 (not ON#1 :5055)
+      - API_URL=http://${TAILSCALE_IP}:5056
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=${SURREAL_USER}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD}
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+      - OPENAI_COMPATIBLE_BASE_URL=${SCOUT_BASE_URL}
+      - OPENAI_COMPATIBLE_BASE_URL_LLM=${SCOUT_BASE_URL}
+      - OPENAI_COMPATIBLE_API_KEY=sk-local
+      - OPENAI_COMPATIBLE_API_KEY_LLM=sk-local
+      - OPENAI_COMPATIBLE_BASE_URL_EMBEDDING=${EMBEDDING_BASE_URL:-http://local-embeddings:8080/v1}
+      - OPENAI_COMPATIBLE_API_KEY_EMBEDDING=sk-local
+      - CORS_ORIGINS=http://omenboy:8503,http://${TAILSCALE_IP}:8503
+      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+    volumes:
+      - /space/open-notebook-2/notebook_data:/app/data:Z
+    depends_on:
+      - surrealdb
+    restart: unless-stopped
+    mem_limit: 3g
+    networks:
+      - on2
+      - open-notebook_default
+
+networks:
+  on2:
+    name: open-notebook-2
+  open-notebook_default:
+    external: true
+    name: open-notebook_default

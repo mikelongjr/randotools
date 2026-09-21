@@ -1,0 +1,70 @@
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    volumes:
+      - ./searxng:/etc/searxng:Z
+      - /space/open-webui/searxng-cache:/var/cache/searxng:Z
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    restart: unless-stopped
+    # JSON format required by Open WebUI (see searxng/settings.yml)
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    networks:
+      - open-webui
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    depends_on:
+      - searxng
+    ports:
+      - "${TAILSCALE_IP}:3000:8080"
+    volumes:
+      - /space/open-webui/data:/app/backend/data:Z
+    environment:
+      - WEBUI_URL=http://${TAILSCALE_IP}:3000
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=true
+      - DO_NOT_TRACK=true
+      # Compose is source of truth (don't let UI overwrite RAG/search on restart)
+      - ENABLE_PERSISTENT_CONFIG=false
+      # No local Ollama on omenboy — avoid host.docker.internal:11434 probes
+      - ENABLE_OLLAMA_API=false
+      # Scout on ascent-2 (OpenAI-compatible)
+      - OPENAI_API_BASE_URL=${SCOUT_BASE_URL}
+      - OPENAI_API_KEY=${SCOUT_API_KEY:-sk-local}
+      - DEFAULT_MODELS=${SCOUT_MODEL:-llama4-scout}
+      # Scout supports native tools but OWUI's empty KB tools cause query loops.
+      # Legacy = classic RAG injection; use chat Web Search toggle for SearXNG.
+      - DEFAULT_MODEL_PARAMS={"function_calling":"legacy"}
+      - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=6
+      # Local Qwen3 embeds (same podman network as Open Notebook)
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3-embedding:0.6b-4k}
+      - RAG_OPENAI_API_BASE_URL=${EMBEDDING_BASE_URL}
+      - RAG_OPENAI_API_KEY=${EMBEDDING_API_KEY:-sk-local}
+      # Web search via local SearXNG
+      - ENABLE_WEB_SEARCH=true
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=5
+    networks:
+      - open-webui
+      - open-notebook_default
+    restart: unless-stopped
+
+networks:
+  open-webui:
+    name: open-webui
+  open-notebook_default:
+    external: true
+    name: open-notebook_default

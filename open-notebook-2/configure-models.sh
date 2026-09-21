@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Wire Open Notebook credentials/models via API.
+# Wire Open Notebook #2 credentials/models (omenboy).
 set -euo pipefail
 
-BASE="${OPEN_NOTEBOOK_API:-http://$(tailscale ip -4):5055}"
+BASE="${OPEN_NOTEBOOK_API:-http://$(tailscale ip -4):5056}"
 PW="${OPEN_NOTEBOOK_PASSWORD:?set OPEN_NOTEBOOK_PASSWORD}"
 AUTH=( -H "Authorization: Bearer ${PW}" -H "Content-Type: application/json" )
 
-# Blackbird Ollama on AMD (ROCm) via Tailscale. Override if needed.
-EMBED_URL="${EMBEDDING_BASE_URL:-http://100.127.118.13:11434/v1}"
+EMBED_URL="${EMBEDDING_BASE_URL:-http://local-embeddings:8080/v1}"
 EMBED_MODEL_NAME="${EMBEDDING_MODEL_NAME:-qwen3-embedding:0.6b-4k}"
+SCOUT_URL="${SCOUT_BASE_URL:-http://100.70.176.65:8000/v1}"
 
 api() {
   local method=$1 path=$2
@@ -17,7 +17,6 @@ api() {
 }
 
 echo "Using API $BASE"
-echo "Embeddings: $EMBED_MODEL_NAME @ $EMBED_URL"
 
 CREDS="$(api GET /api/credentials)"
 
@@ -26,12 +25,11 @@ ensure_cred() {
   local id
   id=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(next((c['id'] for c in d if c['name']==sys.argv[2]), ''))" "$CREDS" "$name")
   if [[ -n "$id" ]]; then
-    # Keep base_url in sync (e.g. switch local-embeddings → blackbird tunnel)
     local body
     body=$(python3 -c "import json,sys; print(json.dumps({'name':sys.argv[1],'provider':'openai_compatible','modalities':json.loads(sys.argv[2]),'api_key':'sk-local','base_url':sys.argv[3]}))" "$name" "$mods" "$url")
     api PUT "/api/credentials/$id" -d "$body" >/dev/null
     CREDS="$(api GET /api/credentials)"
-    echo "OK credential: $name ($id) → $url"
+    echo "OK credential: $name → $url"
     echo "$id"
     return
   fi
@@ -39,11 +37,10 @@ ensure_cred() {
   body=$(python3 -c "import json,sys; print(json.dumps({'name':sys.argv[1],'provider':'openai_compatible','modalities':json.loads(sys.argv[2]),'api_key':'sk-local','base_url':sys.argv[3]}))" "$name" "$mods" "$url")
   id=$(api POST /api/credentials -d "$body" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
   CREDS="$(api GET /api/credentials)"
-  echo "CREATED credential: $name ($id)"
+  echo "CREATED credential: $name"
   echo "$id"
 }
 
-SCOUT_URL="${SCOUT_BASE_URL:-http://host.docker.internal:8000/v1}"
 SCOUT_ID=$(ensure_cred "Scout LLM" '["language"]' "$SCOUT_URL" | tail -1)
 EMB_ID=$(ensure_cred "Local Embeddings" '["embedding"]' "$EMBED_URL" | tail -1)
 SPE_ID=$(ensure_cred "Local Speaches" '["text_to_speech","speech_to_text"]' "http://speaches:8000/v1" | tail -1)
@@ -55,7 +52,7 @@ ensure_model() {
   local id
   id=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(next((m['id'] for m in d if m['name']==sys.argv[2] and m['type']==sys.argv[3]), ''))" "$MODELS" "$name" "$typ")
   if [[ -n "$id" ]]; then
-    echo "OK model: $name ($typ) $id"
+    echo "OK model: $name ($typ)"
     echo "$id"
     return
   fi
@@ -63,7 +60,7 @@ ensure_model() {
   body=$(python3 -c "import json,sys; print(json.dumps({'name':sys.argv[1],'provider':'openai_compatible','type':sys.argv[2],'credential':sys.argv[3]}))" "$name" "$typ" "$cid")
   id=$(api POST /api/models -d "$body" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
   MODELS="$(api GET /api/models)"
-  echo "CREATED model: $name ($typ) $id"
+  echo "CREATED model: $name ($typ)"
   echo "$id"
 }
 
@@ -84,9 +81,7 @@ DEFAULTS=$(python3 -c "import json,sys; print(json.dumps({
 
 api PUT /api/models/defaults -d "$DEFAULTS" | python3 -m json.tool
 
-# Docling OCR + Scout picture captions (patch requires DOCLING_VISION_API_URL in compose)
 api PUT /api/settings -d '{"default_content_processing_engine_doc":"docling","docling_ocr":true,"docling_vision":false,"docling_formulas":false,"default_embedding_option":"always"}' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('Docling/embed settings:', {k:d[k] for k in d if 'docling' in k.lower() or 'content_processing' in k.lower() or 'embedding' in k.lower()})"
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('Docling:', {k:d[k] for k in d if 'docling' in k.lower() or 'content_processing' in k.lower()})"
 
-echo "Open Notebook models configured."
-echo "NOTE: Switching embedding models/dims requires re-embedding existing sources."
+echo "Open Notebook #2 models configured."

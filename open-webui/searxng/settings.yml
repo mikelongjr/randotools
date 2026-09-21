@@ -1,0 +1,18 @@
+# Minimal SearXNG config for Open WebUI (JSON results required).
+use_default_settings: true
+
+server:
+  limiter: false
+  image_proxy: true
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "change-me-searxng"
+  base_url: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: en
+  formats:
+    - html
+    - json

@@ -1,0 +1,15 @@
+[Unit]
+Description=Open Notebook #2 (omenboy client dataset) via podman-compose
+After=network-online.target open-notebook.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/open-notebook-2
+ExecStart=/usr/bin/podman-compose --env-file /opt/open-notebook-2/.env up -d
+ExecStop=/usr/bin/podman-compose --env-file /opt/open-notebook-2/.env stop
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
