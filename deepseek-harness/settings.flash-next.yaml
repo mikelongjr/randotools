@@ -1,0 +1,26 @@
+# DeepSeek Harness → ascent-2 Qwen3.8-Flash-Next (NVFP4)
+llm-pi-ai:
+  providers:
+    gx10-flash:
+      displayName: GX-10 Flash-Next (ascent-2)
+      apiKeyEnv: GX10_SCOUT_API_KEY
+      api: openai-completions
+      baseURL: http://100.70.176.65:8000/v1
+      defaultContextWindow: 262144
+      defaultMaxTokens: 16384
+      defaultInput: [text]
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens
+        supportsReasoningEffort: false
+      models:
+        - id: qwen3.8-flash-next
+          name: Qwen3.8 Flash-Next
+          contextWindow: 262144
+          maxTokens: 16384
+          input: [text]
+          reasoningEfforts: false
+
+agent-default-model:
+  provider: gx10-flash
+  model: qwen3.8-flash-next

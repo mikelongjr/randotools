@@ -1,0 +1,24 @@
+[Unit]
+Description=DeepSeek Harness (dsh web) on omenboy → GX-10 Scout
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mike
+Group=mike
+WorkingDirectory=/space/dsh-workspace
+Environment=DSH_HOME=/home/mike/.dsh
+Environment=HOME=/home/mike
+Environment=PATH=/space/deepseek-harness/node_modules/.bin:/usr/local/bin:/usr/bin
+EnvironmentFile=-/home/mike/.dsh/.env
+# Invoke via /usr/bin/node: /space is unlabeled_t under SELinux and systemd cannot Exec the .bin symlink.
+# Host schema allows only 127.0.0.1 or 0.0.0.0. Loopback + SSH forward is the default.
+# For Tailscale browser access: add --host 0.0.0.0 --trusted-host 100.92.114.10 --trusted-host 100.92.114.10:3080
+ExecStart=/usr/bin/node /space/deepseek-harness/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 3080
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# Point web_search at Exa (provider id: exa). Restate full `web` config —
+# cordis patches replace config wholesale.
+- id: web
+  config:
+    searchProvider: exa
+    fetchProvider: http
+
+# Official DeepSeek search needs DEEPSEEK_API_KEY; disable so agents don't hit it.
+- id: web-search-deepseek
+  disabled: true
+
+- insert:
+    - id: web-search-exa
+      name: '@deepseek-ai/dsh-web-search-exa'
+      # apiKey defaults from $EXA_API_KEY (set in /home/mike/.dsh/.env)

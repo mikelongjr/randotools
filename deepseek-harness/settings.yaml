@@ -1,0 +1,26 @@
+# DeepSeek Harness on omenboy → GX-10 / ascent-2 Scout (vLLM OpenAI API)
+llm-pi-ai:
+  providers:
+    gx10-scout:
+      displayName: GX-10 Scout (ascent-2)
+      apiKeyEnv: GX10_SCOUT_API_KEY
+      api: openai-completions
+      baseURL: http://100.70.176.65:8000/v1
+      defaultContextWindow: 65536
+      defaultMaxTokens: 8192
+      defaultInput: [text, image]
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens
+        supportsReasoningEffort: false
+      models:
+        - id: llama4-scout
+          name: Llama 4 Scout
+          contextWindow: 65536
+          maxTokens: 8192
+          input: [text, image]
+          reasoningEfforts: false
+
+agent-default-model:
+  provider: gx10-scout
+  model: llama4-scout
